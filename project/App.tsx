@@ -1,0 +1,65 @@
+import React from 'react';
+import { Toaster } from 'react-hot-toast';
+import { AuthProvider, useAuth } from './src/contexts/AuthContext';
+import { DatabaseProvider, useDatabase } from './src/contexts/DatabaseContext';
+import Login from './src/components/Login';
+import DatabaseConnection from './src/components/DatabaseConnection';
+import Dashboard from './src/components/Dashboard';
+import LoadingSpinner from './src/components/ui/LoadingSpinner';
+
+const AppContent: React.FC = () => {
+  const { user, loading: authLoading } = useAuth();
+  const { isConnected } = useDatabase();
+
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-gray-900 flex items-center justify-center">
+        <LoadingSpinner size="lg" />
+      </div>
+    );
+  }
+
+  
+
+  if (!isConnected) {
+    return <DatabaseConnection />;
+  }
+
+  return <Dashboard />;
+};
+
+function App() {
+  return (
+    <AuthProvider>
+      <DatabaseProvider>
+        <div className="min-h-screen bg-gray-900">
+          <AppContent />
+          <Toaster
+            position="top-right"
+            toastOptions={{
+              style: {
+                background: '#374151',
+                color: '#fff',
+                border: '1px solid #4B5563',
+              },
+              success: {
+                iconTheme: {
+                  primary: '#10B981',
+                  secondary: '#fff',
+                },
+              },
+              error: {
+                iconTheme: {
+                  primary: '#EF4444',
+                  secondary: '#fff',
+                },
+              },
+            }}
+          />
+        </div>
+      </DatabaseProvider>
+    </AuthProvider>
+  );
+}
+
+export default App;
