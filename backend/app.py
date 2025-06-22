@@ -4,6 +4,8 @@ from database_connection import connect_postgresql_from_json
 from tables_view import get_postgresql_tables, get_postgresql_table_data 
 from gemini import generate_dml_proposal 
 from add_data import new_data
+from auth import login_api
+from database_view import get_postgresql_databases, clear_connected_databases
 
 app = Flask(__name__)
 CORS(app, supports_credentials=True)
@@ -65,7 +67,22 @@ def add_data_api():
     else:
         return jsonify({"success": False, "error": error}), 500
 
+@app.route('/login', methods=['POST'])
+def login():
+    return login_api()
 
+@app.route('/databases', methods=['GET'])
+def view_databases():
+    """
+    Returns list of database details from database_details table.
+    """
+    databases = get_postgresql_databases()
+    return jsonify({"databases": databases})
+
+@app.route('/logout_cleanup', methods=['POST'])
+def logout_cleanup():
+    clear_connected_databases()
+    return jsonify({"status": "cleared"})
 
 if __name__ == "__main__":
     app.run(debug=True)

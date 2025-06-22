@@ -3,7 +3,13 @@ import { LogOut, User } from 'lucide-react';
 import { useAuth } from '../../contexts/AuthContext';
 
 const TopNav: React.FC = () => {
-  const { user, logout } = useAuth();
+  const { user, logout: originalLogout } = useAuth();
+
+  const logout = async () => {
+    // Call backend to clear connected databases
+    await fetch('http://localhost:5000/logout_cleanup', { method: 'POST' });
+    originalLogout();
+  };
 
   return (
     <nav className="bg-gray-800 border-b border-gray-700 px-6 py-4">

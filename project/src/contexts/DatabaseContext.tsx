@@ -31,17 +31,13 @@ interface DatabaseContextType {
   setSelectedTable: (table: string | null) => void;
   tableData: TableData | null;
   setTableData: (data: TableData | null) => void;
+  selectedDatabase: string;
+  setSelectedDatabase: (db: string) => void;
 }
 
 const DatabaseContext = createContext<DatabaseContextType | undefined>(undefined);
 
-export const useDatabase = () => {
-  const context = useContext(DatabaseContext);
-  if (!context) {
-    throw new Error('useDatabase must be used within a DatabaseProvider');
-  }
-  return context;
-};
+export const useDatabase = () => useContext(DatabaseContext);
 
 export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [credentials, setCredentials] = useState<DatabaseCredentials | null>(null);
@@ -49,6 +45,7 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [tables, setTables] = useState<TableInfo[]>([]);
   const [selectedTable, setSelectedTable] = useState<string | null>(null);
   const [tableData, setTableData] = useState<TableData | null>(null);
+  const [selectedDatabase, setSelectedDatabase] = useState<string>("");
 
   const value = {
     credentials,
@@ -60,7 +57,9 @@ export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     selectedTable,
     setSelectedTable,
     tableData,
-    setTableData
+    setTableData,
+    selectedDatabase,
+    setSelectedDatabase
   };
 
   return (

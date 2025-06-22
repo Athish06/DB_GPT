@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { Toaster } from 'react-hot-toast';
 import { AuthProvider, useAuth } from './src/contexts/AuthContext';
 import { DatabaseProvider, useDatabase } from './src/contexts/DatabaseContext';
@@ -9,7 +9,31 @@ import LoadingSpinner from './src/components/ui/LoadingSpinner';
 
 const AppContent: React.FC = () => {
   const { user, loading: authLoading } = useAuth();
-  const { isConnected } = useDatabase();
+  const databaseContext = useDatabase();
+  const { isConnected, setCredentials, setIsConnected, credentials } = databaseContext || {};
+
+  // Try to auto-connect if user has databases in localStorage and not already connected
+  useEffect(() => {
+    if (user && !isConnected) {
+      const dbs = localStorage.getItem('user_databases');
+      if (dbs) {
+        const databases = JSON.parse(dbs);
+        if (databases.length > 0) {
+          // You can let user pick, or auto-connect to the first one
+          const db = databases[0];
+          setCredentials && setCredentials({
+            type: 'postgresql',
+            host: db.host,
+            port: db.port,
+            username: db.user_name,
+            password: db.password,
+            database: db.database_name,
+          });
+          setIsConnected && setIsConnected(true);
+        }
+      }
+    }
+  }, [user, isConnected, setCredentials, setIsConnected]);
 
   if (authLoading) {
     return (
@@ -19,9 +43,13 @@ const AppContent: React.FC = () => {
     );
   }
 
-  
+  if (!user) {
+    return <Login />;
+  }
 
-  if (!isConnected) {
+  // Only show DatabaseConnection if user has no saved databases
+  const userDatabases = localStorage.getItem('user_databases');
+  if (!isConnected && (!userDatabases || JSON.parse(userDatabases).length === 0)) {
     return <DatabaseConnection />;
   }
 

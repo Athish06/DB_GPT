@@ -4,7 +4,11 @@ import { useDatabase } from '../contexts/DatabaseContext';
 import LoadingSpinner from './ui/LoadingSpinner';
 
 const DatabaseConnection: React.FC = () => {
-  const { setCredentials, setIsConnected, setTables } = useDatabase();
+  const databaseContext = useDatabase();
+  if (!databaseContext) {
+    throw new Error('DatabaseContext is undefined. Please ensure DatabaseProvider is used.');
+  }
+  const { setCredentials, setIsConnected, setTables } = databaseContext;
   const [formData, setFormData] = useState({
     type: 'postgresql' as const,
     host: '',
