@@ -7,7 +7,8 @@ import AIChat from './AIChat';
 import DataForm from './DataForm';
 
 const Dashboard: React.FC = () => {
-  const { isConnected } = useDatabase();
+  const dbContext = useDatabase();
+  const isConnected = dbContext?.isConnected ?? false;
 
   return (
     <div className="h-screen bg-gray-900 flex flex-col">

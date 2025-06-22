@@ -10,7 +10,7 @@ import LoadingSpinner from './src/components/ui/LoadingSpinner';
 const AppContent: React.FC = () => {
   const { user, loading: authLoading } = useAuth();
   const databaseContext = useDatabase();
-  const { isConnected, setCredentials, setIsConnected, credentials } = databaseContext || {};
+  const { isConnected, setCredentials, setIsConnected } = databaseContext || {};
 
   // Try to auto-connect if user has databases in localStorage and not already connected
   useEffect(() => {
@@ -48,10 +48,10 @@ const AppContent: React.FC = () => {
   }
 
   // Only show DatabaseConnection if user has no saved databases
-  const userDatabases = localStorage.getItem('user_databases');
-  if (!isConnected && (!userDatabases || JSON.parse(userDatabases).length === 0)) {
-    return <DatabaseConnection />;
-  }
+  ///const userDatabases = localStorage.getItem('user_databases');
+  ///if (!isConnected && (!userDatabases || JSON.parse(userDatabases).length === -1)) {
+   /// return <DatabaseConnection />;
+ /// }
 
   return <Dashboard />;
 };

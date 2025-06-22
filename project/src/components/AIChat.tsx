@@ -10,7 +10,10 @@ interface QueryResult {
 }
 
 const AIChat: React.FC = () => {
-  const { selectedTable, credentials, tables } = useDatabase();
+  const dbContext = useDatabase();
+  const selectedTable = dbContext?.selectedTable;
+  const credentials = dbContext?.credentials;
+  const tables = dbContext?.tables;
   const [question, setQuestion] = useState('');
   const [results, setResults] = useState<QueryResult[]>([]);
   const [isLoading, setIsLoading] = useState(false);

@@ -1,10 +1,10 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from database_connection import connect_postgresql_from_json
+from database_connection import connect_postgresql_from_json, add_database_details
 from tables_view import get_postgresql_tables, get_postgresql_table_data 
 from gemini import generate_dml_proposal 
 from add_data import new_data
-from auth import login_api
+from auth import login_api, signup_api
 from database_view import get_postgresql_databases, clear_connected_databases
 
 app = Flask(__name__)
@@ -71,6 +71,10 @@ def add_data_api():
 def login():
     return login_api()
 
+@app.route('/signup', methods=['POST'])
+def signup():
+    return signup_api()
+
 @app.route('/databases', methods=['GET'])
 def view_databases():
     """
@@ -83,6 +87,15 @@ def view_databases():
 def logout_cleanup():
     clear_connected_databases()
     return jsonify({"status": "cleared"})
+
+@app.route('/add_db', methods=['POST'])
+def add_db():
+    db_config = request.get_json()
+    success, error = add_database_details(db_config)
+    if success:
+        return jsonify({"status": "success", "message": "Database added and connected."}), 200
+    else:
+        return jsonify({"status": "error", "message": error}), 500
 
 if __name__ == "__main__":
     app.run(debug=True)

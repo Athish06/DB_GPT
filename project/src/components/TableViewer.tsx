@@ -4,15 +4,23 @@ import { useDatabase } from '../contexts/DatabaseContext';
 import LoadingSpinner from './ui/LoadingSpinner';
 
 const TableViewer: React.FC = () => {
-  const { selectedTable, tableData, setTableData, credentials } = useDatabase();
+  const databaseContext = useDatabase();
+  const selectedTable = databaseContext?.selectedTable;
+  const selectedDatabase = databaseContext?.selectedDatabase;
+  const tableData = databaseContext?.tableData;
+  const setTableData = databaseContext?.setTableData;
+  const credentials = databaseContext?.credentials;
   const [isLoading, setIsLoading] = useState(false);
 
   useEffect(() => {
-    if (selectedTable) {
+    if (selectedTable && credentials) {
       loadTableData();
+    } else {
+      if (setTableData) setTableData(null);
     }
+    // Now reload when credentials (database) changes or selectedTable changes
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedTable]);
+  }, [selectedTable, credentials]);
 
   const loadTableData = async () => {
     if (!selectedTable || !credentials) return;
@@ -27,19 +35,19 @@ const TableViewer: React.FC = () => {
         credentials: 'include',
         body: JSON.stringify({
           host: credentials.host,
-          database: credentials.database,
+          database: selectedDatabase,
           user: credentials.username,
           password: credentials.password,
         }),
       });
       const data = await response.json();
       if (data && data.schema && data.rows) {
-        setTableData(data);
+        if (setTableData) setTableData(data);
       } else {
-        setTableData(null);
+        if (setTableData) setTableData(null);
       }
     } catch (error) {
-      setTableData(null);
+      if (setTableData) setTableData(null);
     }
     setIsLoading(false);
   };

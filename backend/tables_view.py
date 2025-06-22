@@ -50,6 +50,9 @@ def get_postgresql_table_data(db_config: dict, table_name: str):
             password=db_config["password"]
         )
         cur = conn.cursor()
+        print(table_name)
+        database = db_config.get("database", "postgres")
+        print(database)
         cur.execute(f"SELECT * FROM {table_name};")
         rows = cur.fetchall()
         colnames = [desc[0] for desc in cur.description]

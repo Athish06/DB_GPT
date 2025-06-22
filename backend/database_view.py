@@ -31,17 +31,16 @@ def get_postgresql_databases():
             port=env.get("DB_PORT", 5432)
         )
         cur = conn.cursor()
-        cur.execute("SELECT id, database_name, host, user_name, port FROM database_details;")
+        cur.execute("SELECT database_name, host, user_name, port FROM database_details;")
         rows = cur.fetchall()
         # Only include databases that are in connected_databases
         databases = []
         for row in rows:
             db_row = {
-                "id": row[0],
-                "database_name": row[1],
-                "host": row[2],
-                "user_name": row[3],
-                "port": row[4]
+                "database_name": row[0],
+                "host": row[1],
+                "user_name": row[2],
+                "port": row[3]
             }
             for connected in connected_databases:
                 if (db_row["database_name"] == connected["database_name"] and

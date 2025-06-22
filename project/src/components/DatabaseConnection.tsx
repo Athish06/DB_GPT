@@ -3,12 +3,24 @@ import { Database, ArrowRight } from 'lucide-react';
 import { useDatabase } from '../contexts/DatabaseContext';
 import LoadingSpinner from './ui/LoadingSpinner';
 
-const DatabaseConnection: React.FC = () => {
+interface DatabaseConnectionProps {
+  mode?: 'add' | 'connect';
+  userEmail?: string; // Add this prop
+  onClose?: () => void;
+  onSuccess?: () => void;
+}
+
+const DatabaseConnection: React.FC<DatabaseConnectionProps> = ({
+  mode = 'connect',
+  userEmail,
+  onClose,
+  onSuccess
+}) => {
   const databaseContext = useDatabase();
   if (!databaseContext) {
     throw new Error('DatabaseContext is undefined. Please ensure DatabaseProvider is used.');
   }
-  const { setCredentials, setIsConnected, setTables } = databaseContext;
+  const { setCredentials, setIsConnected } = databaseContext;
   const [formData, setFormData] = useState({
     type: 'postgresql' as const,
     host: '',
@@ -23,17 +35,18 @@ const DatabaseConnection: React.FC = () => {
     e.preventDefault();
     setIsLoading(true);
 
-    // Prepare payload for backend (as JSON)
     const payload = {
       host: formData.host,
       database: formData.database,
       user: formData.username,
       password: formData.password,
-      // port can be added if backend supports it
+      port: formData.port,
+      name: userEmail
     };
 
     try {
-      const response = await fetch('http://localhost:5000/connect_db', {
+      const endpoint = mode === 'add' ? 'http://localhost:5000/add_db' : 'http://localhost:5000/connect_db';
+      const response = await fetch(endpoint, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -45,10 +58,10 @@ const DatabaseConnection: React.FC = () => {
       if (response.ok && data.status === 'success') {
         setCredentials(formData);
         setIsConnected(true);
-        // Optionally fetch tables here if needed
+        if (onSuccess) onSuccess(); // Call without arguments
+        if (onClose) onClose();
       } else {
         setIsConnected(false);
-        // Optionally handle error
         console.error(data.message);
       }
     } catch (error) {
@@ -69,7 +82,10 @@ const DatabaseConnection: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-gray-900 flex items-center justify-center px-4">
-      <div className="max-w-md w-full space-y-8">
+      <div
+        className="max-w-md w-full space-y-8"
+        style={{ minWidth: 300, maxWidth: 800, width: 400 }}
+      >
         <div className="text-center">
           <div className="mx-auto h-12 w-12 bg-blue-600 rounded-lg flex items-center justify-center">
             <Database className="h-6 w-6 text-white" />
