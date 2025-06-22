@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Database, Table, Plus } from 'lucide-react';
+import { Database, Table, Plus, ChevronLeft, ChevronRight } from 'lucide-react'; // Import Chevron icons
 import { useDatabase } from '../../contexts/DatabaseContext';
 import { useAuth } from '../../contexts/AuthContext';
 import DatabaseConnection from '../DatabaseConnection';
@@ -8,20 +8,25 @@ const Sidebar: React.FC = () => {
   const databaseContext = useDatabase();
   const { user } = useAuth();
   const [showAddModal, setShowAddModal] = useState(false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true); // New state for sidebar toggle
 
   if (!databaseContext) {
-    return <div className="w-64 bg-gray-800 border-r border-gray-700 flex flex-col justify-center items-center text-gray-400">Database context not available.</div>;
+    return (
+      <div className="w-64 bg-gray-800 border-r border-gray-700 flex flex-col justify-center items-center text-gray-400">
+        Database context not available.
+      </div>
+    );
   }
 
-  const { 
-    isConnected, 
-    tables, 
+  const {
+    isConnected,
+    tables,
     setTables,
-    selectedTable, 
+    selectedTable,
     setSelectedTable,
     credentials,
     selectedDatabase,
-    setSelectedDatabase
+    setSelectedDatabase,
   } = databaseContext;
 
   const [dbs, setDbs] = useState<string[]>([]);
@@ -46,6 +51,7 @@ const Sidebar: React.FC = () => {
         setDbs([]);
       }
     } catch (error) {
+      console.error('Error fetching databases:', error);
       setDbs([]);
     }
   };
@@ -75,16 +81,21 @@ const Sidebar: React.FC = () => {
           });
           const data = await response.json();
           if (data && data.tables) {
-            setTables(data.tables.map((name: string) => ({
-              name,
-              type: 'table'
-            })));
+            setTables(
+              data.tables.map((name: string) => ({
+                name,
+                type: 'table',
+              }))
+            );
           } else {
             setTables([]);
           }
         } catch (error) {
+          console.error('Error fetching tables:', error);
           setTables([]);
         }
+      } else {
+        setTables([]); // Clear tables if no database is selected or not connected
       }
     };
     fetchTables();
@@ -101,17 +112,33 @@ const Sidebar: React.FC = () => {
     }
   };
 
+  const toggleSidebar = () => {
+    setIsSidebarOpen(!isSidebarOpen);
+  };
+
   return (
-    <div className="w-64 bg-gray-800 border-r border-gray-700 flex flex-col">
-      <div className="p-4 border-b border-gray-700">
+    <div
+      className={`bg-gray-800 border-r border-gray-700 flex flex-col transition-all duration-300 ease-in-out ${
+        isSidebarOpen ? 'w-64' : 'w-16' // Set width based on sidebar state
+      } overflow-hidden`} // Hide overflowing content when collapsed
+    >
+      {/* Sidebar Header with Toggle Button */}
+      <div className="p-4 border-b border-gray-700 flex items-center justify-between">
         <div className="flex items-center space-x-2 text-white">
           <Database className="h-5 w-5" />
-          <span className="font-medium">Databases</span>
+          {isSidebarOpen && <span className="font-medium whitespace-nowrap">Databases</span>}
         </div>
+        <button
+          onClick={toggleSidebar}
+          className="text-gray-400 hover:text-white transition-colors focus:outline-none"
+          aria-label={isSidebarOpen ? 'Collapse sidebar' : 'Expand sidebar'}
+        >
+          {isSidebarOpen ? <ChevronLeft className="h-5 w-5" /> : <ChevronRight className="h-5 w-5" />}
+        </button>
       </div>
 
-      {/* List of Databases */}
-      <div className="border-t border-b border-gray-700 p-2 bg-gray-900 flex-1">
+      {/* List of Databases - Only visible when sidebar is open */}
+      <div className={`border-t border-b border-gray-700 p-2 bg-gray-900 flex-1 ${isSidebarOpen ? '' : 'hidden'}`}>
         {dbs.length === 0 ? (
           <div className="p-4 text-center text-gray-400">
             <Database className="h-8 w-8 mx-auto mb-2 opacity-50" />
@@ -137,8 +164,8 @@ const Sidebar: React.FC = () => {
         )}
       </div>
 
-      {/* Tables under selected database */}
-      <div className="flex-1 overflow-y-auto">
+      {/* Tables under selected database - Only visible when sidebar is open */}
+      <div className={`flex-1 overflow-y-auto ${isSidebarOpen ? '' : 'hidden'}`}>
         {!isConnected ? (
           <div className="p-4 text-center text-gray-400">
             <Database className="h-8 w-8 mx-auto mb-2 opacity-50" />
@@ -171,23 +198,25 @@ const Sidebar: React.FC = () => {
         )}
       </div>
 
-      {/* Always show Add Database button */}
-      <div className="p-4 border-t border-gray-700">
-        <button
-          className="w-full flex items-center justify-center space-x-2 px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
-          onClick={() => setShowAddModal(true)}
-        >
-          <Plus className="h-4 w-4" />
-          <span className="text-sm">Add Database</span>
-        </button>
-      </div>
+      {/* Always show Add Database button - Only visible when sidebar is open */}
+      {isSidebarOpen && (
+        <div className="p-4 border-t border-gray-700">
+          <button
+            className="w-full flex items-center justify-center space-x-2 px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
+            onClick={() => setShowAddModal(true)}
+          >
+            <Plus className="h-4 w-4" />
+            <span className="text-sm">Add Database</span>
+          </button>
+        </div>
+      )}
 
       {/* Modal for adding database */}
       {showAddModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
           <div
             className="relative bg-gray-800 rounded-lg shadow-lg p-6"
-            style={{ minWidth: 300, maxWidth: 800, width: 600 ,height: 'auto' }} 
+            style={{ minWidth: 300, maxWidth: 800, width: 600, height: 'auto' }}
           >
             {/* Close icon */}
             <button

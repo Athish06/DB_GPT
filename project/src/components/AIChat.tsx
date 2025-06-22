@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { MessageSquare, Send, Sparkles } from 'lucide-react';
 import { useDatabase } from '../contexts/DatabaseContext';
 import LoadingSpinner from './ui/LoadingSpinner';
@@ -12,7 +12,7 @@ interface QueryResult {
 const AIChat: React.FC = () => {
   const dbContext = useDatabase();
   const selectedTable = dbContext?.selectedTable;
-  const credentials = dbContext?.credentials;
+  const credentials = dbContext?.credentials; // Note: credentials are not used in AIChat for the AI call, but might be needed elsewhere
   const tables = dbContext?.tables;
   const [question, setQuestion] = useState('');
   const [results, setResults] = useState<QueryResult[]>([]);
@@ -67,6 +67,7 @@ const AIChat: React.FC = () => {
         }, ...prev]);
       }
     } catch (error) {
+      console.error("Error communicating with AI backend:", error); // Added error logging
       setResults(prev => [{
         query: "",
         explanation: "Error communicating with AI backend.",
@@ -108,7 +109,7 @@ const AIChat: React.FC = () => {
                   {result.query}
                 </code>
               </div>
-              
+
               <div className="bg-gray-700 rounded-lg p-3">
                 <p className="text-white text-sm font-medium mb-2">Explanation:</p>
                 <p className="text-gray-300 text-sm">{result.explanation}</p>

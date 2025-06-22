@@ -4,7 +4,10 @@ import { useDatabase } from '../contexts/DatabaseContext';
 import LoadingSpinner from './ui/LoadingSpinner';
 
 const DataForm: React.FC = () => {
-  const { selectedTable, tableData, credentials } = useDatabase();
+  const databaseContext = useDatabase();
+  const selectedTable = databaseContext?.selectedTable;
+  const tableData = databaseContext?.tableData;
+  const credentials = databaseContext?.credentials;
   const [formData, setFormData] = useState<Record<string, any>>({});
   const [aiPrompt, setAiPrompt] = useState('');
   const [isLoadingAI, setIsLoadingAI] = useState(false);
