@@ -3,7 +3,6 @@ import { Toaster } from 'react-hot-toast';
 import { AuthProvider, useAuth } from './src/contexts/AuthContext';
 import { DatabaseProvider, useDatabase } from './src/contexts/DatabaseContext';
 import Login from './src/components/Login';
-import DatabaseConnection from './src/components/DatabaseConnection';
 import Dashboard from './src/components/Dashboard';
 import LoadingSpinner from './src/components/ui/LoadingSpinner';
 

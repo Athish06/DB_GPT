@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from database_connection import connect_postgresql_from_json, add_database_details
 from tables_view import get_postgresql_tables, get_postgresql_table_data 
-from gemini import generate_dml_proposal 
+
 from add_data import new_data
 from auth import login_api, signup_api
 from database_view import get_postgresql_databases, clear_connected_databases
@@ -41,19 +41,7 @@ def view_table_data(table_name):
     return jsonify(data)
 
 
-@app.route('/ai/generate-dml', methods=['POST'])
-def ai_generate_dml():
-    data = request.get_json()
-    user_request = data.get("user_request")
-    schema_info = data.get("schema_info")
-    db_type = data.get("db_type", "PostgreSQL")
-    if not user_request or not schema_info:
-        return jsonify({"error": "Missing user_request or schema_info"}), 400
-    dml = generate_dml_proposal(user_request, schema_info, db_type)
-    if dml:
-        return jsonify({"dml": dml})
-    else:
-        return jsonify({"error": "Failed to generate DML"}), 500
+
 
 @app.route('/add_data', methods=['POST'])
 def add_data_api():
@@ -96,6 +84,23 @@ def add_db():
         return jsonify({"status": "success", "message": "Database added and connected."}), 200
     else:
         return jsonify({"status": "error", "message": error}), 500
+
+@app.route('/analyze_table', methods=['POST'])
+def analyze_table():
+    """
+    Expects JSON: { "db_config": {...}, "table_name": "...", "prompt": "...", "want_sql": true/false }
+    Calls the model's analyze_table function.
+    """
+    from model import analyze_table_data  # Import here to avoid circular import
+    data = request.get_json()
+    db_config = data.get("db_config")
+    table_name = data.get("table_name")
+    prompt = data.get("prompt", "")
+    want_sql = data.get("want_sql", False)
+    print(f"Received request to analyze table: {table_name} with prompt: {prompt} and want_sql: {want_sql}")
+    if not db_config or not table_name or not prompt:
+        return jsonify({"error": "Missing db_config, table_name, or prompt"}), 400
+    return analyze_table_data(db_config, table_name, prompt, want_sql)
 
 if __name__ == "__main__":
     app.run(debug=True)
