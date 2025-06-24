@@ -20,7 +20,7 @@ DB_CONFIG = {
     "password": os.getenv("DB_PASSWORD")
 }
 
-# Set Ollama host for the ollama client library
+# Set Olloma host for the ollama client library
 ollama_host = os.getenv("OLLAMA_HOST", "http://localhost:11500")
 # The ollama client library automatically uses OLLAMA_HOST env var, 
 # but you can explicitly create a client if needed:
@@ -104,6 +104,40 @@ def analyze_table_data(db_config, table_name, user_prompt, want_sql=False):
             cur.close()
         if conn:
             conn.close()
+
+    # --- NEW STEP: Refine the user prompt using Llama3 and the schema ---
+    try:
+        refine_prompt_messages = [
+            {
+                'role': 'system',
+                'content': (
+                    "You are an expert assistant that helps users interact with a PostgreSQL database. "
+                    "Given the table schema and a user request, rewrite or clarify the user's request so that it is as clear, specific, and unambiguous as possible, "
+                    "using the actual table and column names from the schema. "
+                    "If the user's request is already clear and matches the schema, return it as is. "
+                    "Do NOT generate SQL, just return the improved or clarified user request."
+                )
+            },
+            {
+                'role': 'user',
+                'content': (
+                    f"Table schema:\n{schema_ddl_statements}\n\n"
+                    f"Original user request: {user_prompt}\n\n"
+                    f"Please rewrite or clarify using appropriate words (related to the context of the query given by the user) in BRIEF but more clearer with all requirements needed in the user's request using the schema above."
+                )
+            }
+        ]
+        refine_response = ollama.chat(
+            model=OLLAMA_LLM_MODEL,
+            messages=refine_prompt_messages,
+            options={"temperature": 0.0}
+        )
+        refined_user_prompt = refine_response['message']['content'].strip()
+        print(f"Refined user prompt: {refined_user_prompt}")
+        # Use the refined prompt for all further processing
+        user_prompt = refined_user_prompt
+    except Exception as e:
+        print(f"Prompt refinement failed, using original prompt. Error: {e}")
 
     # --- NEW STEP: Validate relevance using LLM ---
     relevance_check_prompt = f"""
@@ -255,28 +289,91 @@ Is this question related to the schema above? Answer only "YES" or "NO".
 
         for idx, single_query in enumerate(queries):
             print(f"Executing query {idx+1}: {single_query}")
-            # --- Case-insensitive handling for non-SELECT queries from Llama3 ---
-            # If this is a modifying operation (not SELECT), make sure to compare lowercased
+            # --- Remove unnecessary outer brackets from the query before execution ---
+            stripped_query = single_query.strip()
+            if stripped_query.startswith('(') and stripped_query.endswith(')'):
+                single_query = stripped_query[1:-1].strip()
+                print(f"Removed outer brackets: {single_query}")
+
             query_type = single_query.strip().split()[0].lower() if single_query.strip() else ""
             is_select_query = query_type == "select" or query_type.startswith("(select")
-            # For modifying operations, ensure case-insensitive execution logic
-            if not is_select_query:
-                # You can add any additional logic here if you want to process/validate further
-                cur.execute(single_query)
-                affected = cur.rowcount if hasattr(cur, 'rowcount') else 0
-                conn.commit()
-                multi_action_status.append({"rows_affected": affected})
-                print(f"Non-SELECT query executed. Rows affected: {affected}")
-            else:
-                cur.execute(single_query)
-                if cur.description:
-                    columns = [desc[0] for desc in cur.description]
-                    rows = cur.fetchall()
-                    result_set = [dict(zip(columns, row)) for row in rows]
-                    multi_results.append(result_set)
-                    print(f"SELECT query executed successfully. Retrieved {len(result_set)} rows.")
-                else:
-                    multi_results.append([])
+
+            # --- Try executing, and if syntax error, attempt up to 3 rounds of Llama3 correction ---
+            max_attempts = 3
+            attempt = 0
+            executed = False
+            last_error = None
+            while attempt < max_attempts and not executed:
+                try:
+                    if not is_select_query:
+                        cur.execute(single_query)
+                        affected = cur.rowcount if hasattr(cur, 'rowcount') else 0
+                        conn.commit()
+                        multi_action_status.append({"rows_affected": affected})
+                        print(f"Non-SELECT query executed. Rows affected: {affected}")
+                    else:
+                        cur.execute(single_query)
+                        if cur.description:
+                            columns = [desc[0] for desc in cur.description]
+                            rows = cur.fetchall()
+                            result_set = [dict(zip(columns, row)) for row in rows]
+                            multi_results.append(result_set)
+                            print(f"SELECT query executed successfully. Retrieved {len(result_set)} rows.")
+                        else:
+                            multi_results.append([])
+                    executed = True  # Success, break loop
+                except psycopg2.Error as e:
+                    last_error = e
+                    print(f"Query execution failed (attempt {attempt+1}): {e.pgerror}")
+                    # Only try to fix if it's a syntax error
+                    if e.pgcode == '42601':  # 42601 is PostgreSQL syntax_error
+                        # Ask Llama3 to fix the query
+                        fix_messages = [
+                            {
+                                'role': 'system',
+                                'content': (
+                                    "You are an expert PostgreSQL SQL syntax fixer. "
+                                    "Given a SQL query that failed due to a syntax error, correct the query. "
+                                    "Reply ONLY with the corrected SQL query. Do not explain, do not add markdown, just the corrected SQL."
+                                )
+                            },
+                            {
+                                'role': 'user',
+                                'content': (
+                                    f"The following SQL query failed due to a syntax error:\n{single_query}\n"
+                                    f"Error message: {e.pgerror}\n"
+                                    f"Please provide the corrected SQL query."
+                                )
+                            }
+                        ]
+                        try:
+                            fix_response = ollama.chat(
+                                model=OLLAMA_LLM_MODEL,
+                                messages=fix_messages,
+                                options={"temperature": 0.0}
+                            )
+                            fixed_query = fix_response['message']['content'].strip()
+                            print(f"Llama3 fixed query (attempt {attempt+1}): {fixed_query}")
+                            # Remove outer brackets if present
+                            if fixed_query.startswith('(') and fixed_query.endswith(')'):
+                                fixed_query = fixed_query[1:-1].strip()
+                            single_query = fixed_query
+                        except Exception as fix_e:
+                            print(f"Failed to get fixed query from Llama3: {fix_e}")
+                            break  # Can't fix, exit retry loop
+                    else:
+                        break  # Not a syntax error, don't retry
+                attempt += 1
+
+            if not executed:
+                # If after all attempts it still fails, handle as error
+                error_message = f"Database execution error: {last_error.pgcode if last_error else ''} - {last_error.pgerror if last_error else ''}"
+                print(error_message)
+                if conn:
+                    conn.rollback()
+                    conn.close()
+                summary = summarize_error_with_llama3(user_prompt, error_message)
+                return jsonify({"summary": summary, "results": [], "action_status": {}, "sql_query": sql_query}), 500
 
         # If only one query, keep old structure for backward compatibility
         if len(queries) == 1:
