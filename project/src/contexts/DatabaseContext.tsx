@@ -16,7 +16,9 @@ export interface TableInfo {
 }
 
 export interface TableData {
-  schema: Array<{ name: string; type: string; nullable: boolean }>;
+  schema: Array<{
+    enumValues(enumValues: any): unknown; name: string; type: string; nullable: boolean 
+}>;
   rows: Array<Record<string, any>>;
 }
 

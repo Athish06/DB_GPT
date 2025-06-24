@@ -8,6 +8,7 @@ const DataForm: React.FC = () => {
   const selectedTable = databaseContext?.selectedTable;
   const tableData = databaseContext?.tableData;
   const credentials = databaseContext?.credentials;
+  const selectedDatabase = databaseContext?.selectedDatabase;
   const [formData, setFormData] = useState<Record<string, any>>({});
   const [aiPrompt, setAiPrompt] = useState('');
   const [isLoadingAI, setIsLoadingAI] = useState(false);
@@ -28,6 +29,46 @@ const DataForm: React.FC = () => {
     setIsLoadingAI(false);
   };
 
+  const handleAIAssistedInsert = async () => {
+    if (!aiPrompt.trim() || !selectedTable || !credentials || !selectedDatabase) return;
+
+    setIsLoadingAI(true);
+
+    const payload = {
+      db_config: {
+        host: credentials.host,
+        database: selectedDatabase,
+        user: credentials.username,
+        password: credentials.password,
+      },
+      table_name: selectedTable,
+      user_prompt: aiPrompt,
+    };
+
+    try {
+      const response = await fetch('http://localhost:5000/add_data_ai', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        credentials: 'include',
+        body: JSON.stringify(payload),
+      });
+      const result = await response.json();
+      if (result?.success) {
+        setFormData({});
+        setAiPrompt('');
+        // Optionally show a success message
+      } else {
+        alert(result?.summary || result?.error || "AI Assistant failed to insert data.");
+      }
+    } catch (error) {
+      alert("Network or server error during AI-assisted insert.");
+    }
+
+    setIsLoadingAI(false);
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedTable || !credentials) return;
@@ -36,7 +77,7 @@ const DataForm: React.FC = () => {
     const payload = {
       db_config: {
         host: credentials.host,
-        database: credentials.database,
+        database: selectedDatabase,
         user: credentials.username,
         password: credentials.password,
       },
@@ -100,7 +141,7 @@ const DataForm: React.FC = () => {
               className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-purple-500"
             />
             <button
-              onClick={handleAIGenerate}
+              onClick={handleAIAssistedInsert}
               disabled={isLoadingAI || !aiPrompt.trim()}
               className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
@@ -110,6 +151,7 @@ const DataForm: React.FC = () => {
                 <Sparkles className="h-4 w-4" />
               )}
             </button>
+            
           </div>
         </div>
 
@@ -118,63 +160,104 @@ const DataForm: React.FC = () => {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {tableData.schema
               .filter(column => column.name.toLowerCase() !== 'id') // Skip auto-increment IDs
-              .map((column) => (
-                <div key={column.name}>
-                  <label className="block text-sm font-medium text-gray-300 mb-2">
-                    {column.name}
-                    {!column.nullable && <span className="text-red-400 ml-1">*</span>}
-                  </label>
-                  {column.type.includes('text') || column.type.includes('varchar') || column.type.includes('string') ? (
-                    <input
-                      type="text"
-                      value={formData[column.name] || ''}
-                      onChange={(e) => handleInputChange(column.name, e.target.value)}
-                      required={!column.nullable}
-                      className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    />
-                  ) : column.type.includes('int') || column.type.includes('number') ? (
+              .map((column) => {
+                const colType = column.type.toLowerCase();
+                const isRequired = !column.nullable;
+                let inputField = null;
+
+                if (colType.includes('int') || colType.includes('number')) {
+                  inputField = (
                     <input
                       type="number"
                       value={formData[column.name] || ''}
                       onChange={(e) => handleInputChange(column.name, e.target.value ? Number(e.target.value) : '')}
-                      required={!column.nullable}
+                      required={isRequired}
+                      placeholder={`Enter ${column.name}`}
                       className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                     />
-                  ) : column.type.includes('bool') ? (
+                  );
+                } else if (colType.includes('float') || colType.includes('double') || colType.includes('real') || colType.includes('decimal')) {
+                  inputField = (
+                    <input
+                      type="number"
+                      step="any"
+                      value={formData[column.name] || ''}
+                      onChange={(e) => handleInputChange(column.name, e.target.value ? Number(e.target.value) : '')}
+                      required={isRequired}
+                      placeholder={`Enter ${column.name}`}
+                      className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  );
+                } else if (colType.includes('bool')) {
+                  inputField = (
                     <select
                       value={formData[column.name] !== undefined ? String(formData[column.name]) : ''}
                       onChange={(e) => handleInputChange(column.name, e.target.value === 'true')}
-                      required={!column.nullable}
+                      required={isRequired}
                       className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                     >
                       <option value="">Select...</option>
                       <option value="true">True</option>
                       <option value="false">False</option>
                     </select>
-                  ) : column.type.includes('date') || column.type.includes('timestamp') ? (
+                  );
+                } else if (colType.includes('date') || colType.includes('timestamp')) {
+                  inputField = (
                     <input
                       type="datetime-local"
                       value={formData[column.name] || ''}
                       onChange={(e) => handleInputChange(column.name, e.target.value)}
-                      required={!column.nullable}
+                      required={isRequired}
+                      placeholder={`Enter ${column.name}`}
                       className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                     />
-                  ) : (
+                  );
+                } else if (colType.includes('enum') && Array.isArray(column.enumValues)) {
+                  inputField = (
+                    <select
+                      value={formData[column.name] || ''}
+                      onChange={(e) => handleInputChange(column.name, e.target.value)}
+                      required={isRequired}
+                      className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      <option value="">Select...</option>
+                      {(
+                        typeof column.enumValues === 'function'
+                          ? (column.enumValues([]) as string[])
+                          : (column.enumValues as unknown as string[])
+                      ).map((val: string) => (
+                        <option key={val} value={val}>{val}</option>
+                      ))}
+                    </select>
+                  );
+                } else {
+                  // Default to text input for string and unknown types
+                  inputField = (
                     <input
                       type="text"
                       value={formData[column.name] || ''}
                       onChange={(e) => handleInputChange(column.name, e.target.value)}
-                      required={!column.nullable}
+                      required={isRequired}
+                      placeholder={`Enter ${column.name}`}
                       className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                     />
-                  )}
-                  <p className="text-xs text-gray-500 mt-1">
-                    Type: {column.type} {column.nullable && '(optional)'}
-                  </p>
-                </div>
-              ))}
-          </div>
+                  );
+                }
 
+                return (
+                  <div key={column.name}>
+                    <label className="block text-sm font-medium text-gray-300 mb-2">
+                      {column.name}
+                      {isRequired && <span className="text-red-400 ml-1">*</span>}
+                    </label>
+                    {inputField}
+                    <p className="text-xs text-gray-500 mt-1">
+                      Type: {column.type} {column.nullable && '(optional)'}
+                    </p>
+                  </div>
+                );
+              })}
+          </div>
           <button
             type="submit"
             disabled={isSubmitting}

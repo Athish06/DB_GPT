@@ -6,6 +6,7 @@ from tables_view import get_postgresql_tables, get_postgresql_table_data
 from add_data import new_data
 from auth import login_api, signup_api
 from database_view import get_postgresql_databases, clear_connected_databases
+from add_data import add_data_llama3_bp
 
 app = Flask(__name__)
 CORS(app, supports_credentials=True)
@@ -101,6 +102,20 @@ def analyze_table():
     if not db_config or not table_name or not prompt:
         return jsonify({"error": "Missing db_config, table_name, or prompt"}), 400
     return analyze_table_data(db_config, table_name, prompt, want_sql)
+
+app.register_blueprint(add_data_llama3_bp, url_prefix="")
+
+@app.route('/add_data_ai', methods=['POST'])
+def add_data_ai():
+    """
+    Expects JSON: { "db_config": {...}, "table_name": "...", "user_prompt": "..." }
+    Uses Llama3-powered data insertion logic.
+    """
+    try:
+        from add_data import add_data_llama3
+    except ImportError:
+        return jsonify({"error": "add_data_llama3 module not found"}), 500
+    return add_data_llama3()
 
 if __name__ == "__main__":
     app.run(debug=True)
