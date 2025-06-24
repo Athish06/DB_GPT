@@ -13,31 +13,59 @@ const AIChat: React.FC = () => {
   const dbContext = useDatabase();
   const selectedTable = dbContext?.selectedTable;
   const selectedDatabase = dbContext?.selectedDatabase;
-  const credentials = dbContext?.credentials; // Note: credentials are not used in AIChat for the AI call, but might be needed elsewhere
+  const credentials = dbContext?.credentials;
   const tables = dbContext?.tables;
   const [question, setQuestion] = useState('');
   const [results, setResults] = useState<QueryResult[]>([]);
   const [isLoading, setIsLoading] = useState(false);
 
-  // Helper to get schema for selected table
-  const getSchemaForSelectedTable = () => {
-    if (!selectedTable || !tables) return null;
-    const table = tables.find(t => t.name === selectedTable);
-    if (!table) return null;
-    return {
-      table_name: table.name,
-      columns: table.columns || []
-    };
-  };
+  // --- DESIGN UPGRADE: Chat bubble style, user/assistant roles, timestamps, SQL, etc. ---
+  interface ChatMessage {
+    role: 'user' | 'assistant';
+    content: string;
+    timestamp: Date;
+    sqlQuery?: string;
+    rawResults?: any;
+    error?: string;
+  }
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+
+  // Add an initial welcome message when the component mounts or table changes
+  useEffect(() => {
+    if (selectedTable && messages.length === 0) {
+      setMessages([
+        {
+          role: 'assistant',
+          content: `Hello! I'm your AI database assistant. I can help you query the '${selectedTable}' table in natural language.`,
+          timestamp: new Date(),
+        },
+      ]);
+    } else if (!selectedTable && messages.length > 0 && messages[0].content.includes("Hello! I'm your AI database assistant.")) {
+      setMessages([]);
+    }
+    // eslint-disable-next-line
+  }, [selectedTable]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!question.trim() || !selectedTable || !selectedDatabase || !credentials) return;
 
+    const currentUserMessage: ChatMessage = {
+      role: 'user',
+      content: question,
+      timestamp: new Date(),
+    };
+
+    setMessages((prevMessages) => [...prevMessages, currentUserMessage]);
+    setQuestion('');
     setIsLoading(true);
 
+    let assistantResponseContent = "I'm sorry, I couldn't process that request.";
+    let generatedSqlQuery = "";
+    let rawQueryResults: any = null;
+    let errorMessage: string | undefined = undefined;
+
     try {
-      // Send the prompt, selected database, and table to the backend model API
       const response = await fetch('http://localhost:5000/analyze_table', {
         method: 'POST',
         headers: {
@@ -52,100 +80,141 @@ const AIChat: React.FC = () => {
             port: credentials.port,
           },
           table_name: selectedTable,
-          prompt: question, // Send the user's prompt as well
+          prompt: currentUserMessage.content,
         }),
       });
       const data = await response.json();
       console.log("AI response:", data);
-      if (data && data.model_output) {
-        setResults(prev => [{
-          query: data.model_output.query || "",
-          explanation: data.model_output.summary || "AI analysis complete.",
-          timestamp: new Date()
-        }, ...prev]);
-      } else if (data && data.table_data) {
-        setResults(prev => [{
-          query: "",
-          explanation: "Table data fetched. No AI analysis performed.",
-          timestamp: new Date()
-        }, ...prev]);
-      } else {
-        setResults(prev => [{
-          query: "",
-          explanation: data.error || "Failed to analyze table.",
-          timestamp: new Date()
-        }, ...prev]);
-      }
-    } catch (error) {
-      console.error("Error communicating with AI backend:", error);
-      setResults(prev => [{
-        query: "",
-        explanation: "Error communicating with AI backend.",
-        timestamp: new Date()
-      }, ...prev]);
-    }
 
-    setQuestion('');
-    setIsLoading(false);
+      if (response.ok) {
+        if (data.summary || data.model_output?.summary) {
+          assistantResponseContent = data.summary || data.model_output?.summary;
+          if (data.sql_query || data.model_output?.query) {
+            generatedSqlQuery = data.sql_query || data.model_output?.query;
+          }
+          if (data.results) {
+            rawQueryResults = data.results;
+          } else if (data.action_status) {
+            rawQueryResults = data.action_status;
+          }
+        } else if (data.error) {
+          errorMessage = data.error;
+          assistantResponseContent = `An error occurred: ${data.error}`;
+        } else {
+          errorMessage = "Unexpected response from backend.";
+          assistantResponseContent = "Received an unexpected response from the AI backend.";
+        }
+      } else {
+        errorMessage = data.error || `Backend responded with status ${response.status}`;
+        assistantResponseContent = `Failed to process: ${errorMessage}`;
+      }
+    } catch (error: any) {
+      console.error("Error communicating with AI backend:", error);
+      errorMessage = error.message || "Network error.";
+      assistantResponseContent = `Could not connect to the AI backend. Please check if the server is running (Error: ${errorMessage}).`;
+    } finally {
+      setIsLoading(false);
+
+      const assistantMessage: ChatMessage = {
+        role: 'assistant',
+        content: assistantResponseContent,
+        timestamp: new Date(),
+        sqlQuery: generatedSqlQuery,
+        rawResults: rawQueryResults,
+        error: errorMessage
+      };
+
+      setMessages((prevMessages) => [...prevMessages, assistantMessage]);
+    }
   };
 
   return (
     <div className="bg-gray-800 rounded-lg h-full flex flex-col">
+      {/* Header */}
       <div className="p-4 border-b border-gray-700">
         <div className="flex items-center space-x-2">
           <MessageSquare className="h-5 w-5 text-blue-400" />
           <h3 className="font-medium text-white">AI Assistant</h3>
         </div>
         <p className="text-sm text-gray-400 mt-1">
-          Ask questions about your data in natural language
+          Ask questions about your data in natural language. Table: {selectedTable || 'None Selected'}
         </p>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
-        {results.length === 0 ? (
+      {/* Chat Messages Area */}
+      <div className="flex-1 overflow-y-auto p-4 space-y-4 flex flex-col-reverse">
+        {messages.length === 0 && !selectedTable ? (
           <div className="text-center text-gray-400 py-8">
             <Sparkles className="h-8 w-8 mx-auto mb-2 opacity-50" />
-            <p className="text-sm">Ask me anything about your data!</p>
+            <p className="text-sm">Please select a database and table to start chatting!</p>
             <p className="text-xs mt-1">
-              Try: "How many users signed up last week?" or "Show me the top 5 customers by revenue"
+              Connect to your database via the "Database" tab.
             </p>
           </div>
+        ) : messages.length === 0 && selectedTable ? (
+          <div className="text-center text-gray-400 py-8">
+            <LoadingSpinner size="md" />
+            <p className="text-sm mt-2">Loading AI assistant...</p>
+          </div>
         ) : (
-          results.map((result, index) => (
-            <div key={index} className="space-y-3">
-              <div className="bg-gray-700 rounded-lg p-3">
-                <p className="text-white text-sm font-medium mb-2">Generated Query:</p>
-                <code className="text-blue-300 text-xs bg-gray-900 p-2 rounded block overflow-x-auto">
-                  {result.query}
-                </code>
-              </div>
-
-              <div className="bg-gray-700 rounded-lg p-3">
-                <p className="text-white text-sm font-medium mb-2">Explanation:</p>
-                <p className="text-gray-300 text-sm">{result.explanation}</p>
-              </div>
-
-              <div className="text-xs text-gray-500 text-right">
-                {result.timestamp.toLocaleTimeString()}
+          [...messages].reverse().map((message, index) => (
+            <div
+              key={index}
+              className={`flex ${
+                message.role === 'user' ? 'justify-end' : 'justify-start'
+              }`}
+            >
+              <div
+                className={`max-w-[70%] rounded-xl p-3 ${
+                  message.role === 'user'
+                    ? 'bg-blue-600 text-white rounded-br-none'
+                    : 'bg-gray-700 text-gray-200 rounded-bl-none'
+                }`}
+              >
+                <p className="text-sm whitespace-pre-wrap">{message.content}</p>
+                {message.sqlQuery && (
+                  <div className="mt-2 bg-gray-900 p-2 rounded-lg text-xs text-blue-300 overflow-x-auto">
+                    <p className="font-semibold text-gray-400 mb-1">Generated SQL:</p>
+                    <pre className="whitespace-pre-wrap">{message.sqlQuery}</pre>
+                  </div>
+                )}
+                {message.rawResults && message.role === 'assistant' && typeof message.rawResults === 'object' && Object.keys(message.rawResults).length > 0 && (
+                  <div className="mt-2 bg-gray-900 p-2 rounded-lg text-xs text-green-300 overflow-x-auto">
+                    <p className="font-semibold text-gray-400 mb-1">Raw Result ({message.rawResults.length > 0 ? (message.rawResults.rows_affected !== undefined ? 'Action Status' : 'Data') : 'Empty'}):</p>
+                    <pre className="whitespace-pre-wrap">{JSON.stringify(message.rawResults, null, 2)}</pre>
+                  </div>
+                )}
+                <div className="text-right text-xs mt-1 text-gray-400 opacity-70">
+                  {message.timestamp.toLocaleTimeString()}
+                </div>
               </div>
             </div>
           ))
         )}
+        {isLoading && (
+          <div className="flex justify-start">
+            <div className="max-w-[70%] rounded-xl p-3 bg-gray-700 text-gray-200 rounded-bl-none">
+              <LoadingSpinner size="sm" />
+              <span className="ml-2 text-sm">Thinking...</span>
+            </div>
+          </div>
+        )}
       </div>
 
+      {/* Input Form */}
       <form onSubmit={handleSubmit} className="p-4 border-t border-gray-700">
         <div className="flex space-x-2">
           <input
             type="text"
             value={question}
             onChange={(e) => setQuestion(e.target.value)}
-            placeholder="Ask a question about your data..."
+            placeholder={selectedTable ? `Ask about the '${selectedTable}' table...` : "Select a table to start chatting..."}
             className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-            disabled={isLoading}
+            disabled={isLoading || !selectedTable}
           />
           <button
             type="submit"
-            disabled={isLoading || !question.trim()}
+            disabled={isLoading || !question.trim() || !selectedTable}
             className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {isLoading ? (
