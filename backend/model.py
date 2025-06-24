@@ -61,34 +61,41 @@ SQLCODER_SYSTEM_PROMPT = (
 def analyze_table_data(db_config, table_name, user_prompt, want_sql=False):
     """
     Core logic to fetch schema, generate SQL, execute it, and summarize results.
-    This function now takes explicit arguments.
+    Now supports: 
+    - SELECT queries via SQLCoder
+    - Modifying queries (INSERT, UPDATE, DELETE, etc.) via Llama3
     """
-    conn = None # Initialize conn to None for proper cleanup in finally block
-    cur = None  # Initialize cur to None
+    conn = None
+    cur = None
 
     # --- 1. Fetch table schema ---
     schema_ddl_statements = ""
     try:
         conn = psycopg2.connect(**db_config)
         cur = conn.cursor()
-        
         cur.execute(f"""
             SELECT column_name, data_type
             FROM information_schema.columns
             WHERE table_name = '{table_name}' AND table_schema = 'public';
         """)
         schema_cols = cur.fetchall()
-        print(schema_cols)  # This will print the raw list of tuples
-        
+
         if not schema_cols:
             return jsonify({"error": f"Table '{table_name}' not found or no columns found in public schema."}), 404
 
         schema_ddl_statements = f"CREATE TABLE {table_name} (\n"
         schema_ddl_statements += ",\n".join([f"    {col[0]} {col[1]}" for col in schema_cols])
         schema_ddl_statements += "\n);"
-        
-        print(f"Schema DDL for SQLCoder:\n{schema_ddl_statements}")
-        
+        print(f"Schema for table '{table_name}':\n{schema_ddl_statements}")
+
+        # --- NEW: Check for required column existence ---
+        columns = [col[0] for col in schema_cols]
+        required_column = 'name'  # or whatever column you want to check
+        if required_column.lower() not in [c.lower() for c in columns]:
+            error_msg = f"The required column '{required_column}' does not exist in the table '{table_name}'."
+            summary = summarize_error_with_llama3(user_prompt, error_msg)
+            return jsonify({"summary": summary, "results": [], "action_status": {}})
+
     except Exception as e:
         print(f"Error fetching schema: {e}")
         return jsonify({"error": f"Error connecting to database or fetching schema: {e}"}), 500
@@ -98,117 +105,221 @@ def analyze_table_data(db_config, table_name, user_prompt, want_sql=False):
         if conn:
             conn.close()
 
-    # --- 2. Generate SQL query using SQLCoder ---
-    sqlcoder_messages = [
-        {
-            'role': 'system',
-            'content': f"{SQLCODER_SYSTEM_PROMPT}\n\nDDL statements for current query context:\n{schema_ddl_statements}"
-        },
-        {
-            'role': 'user',
-            # OPTIMIZED LINE: Removed redundant instructions and raw schema_cols
-            'content': f"Generate a SQL query for the following request: '{user_prompt}' based on the schema of the '{table_name}' table and check if the required column exists else do not generate"
-        }
-    ]
-    print(f"SQLCoder messages to be sent: {json.dumps(sqlcoder_messages, indent=2)}") 
-    
+    # --- NEW STEP: Validate relevance using LLM ---
+    relevance_check_prompt = f"""
+You are a database assistant. You must check whether the user's question relates to the provided database schema.
+
+Schema:
+{schema_ddl_statements}
+
+User Question:
+"{user_prompt}"
+
+Is this question related to the schema above? Answer only "YES" or "NO".
+"""
+
+    relevance_response = None
+    try:
+        relevance_response = ollama.chat(
+            model=OLLAMA_LLM_MODEL,
+            messages=[{"role": "user", "content": relevance_check_prompt}],
+            options={"temperature": 0.0}
+        )
+        relevance_answer = relevance_response['message']['content'].strip().upper()
+        print(f"Relevance check response: {relevance_answer}")
+
+        if relevance_answer != "YES":
+            error_msg = "The question does not relate to the database schema."
+            print(error_msg)
+            summary = summarize_error_with_llama3(user_prompt, error_msg)
+            return jsonify({"summary": summary, "results": [], "action_status": {}})
+
+    except Exception as e:
+        print(f"Error checking prompt relevance: {e}")
+        return jsonify({"error": "Failed to validate question against schema.", "details": str(e)}), 500
+
+    # --- 2. Decide which LLM to use for SQL generation ---
+    # If the user prompt is about modifying operations, use Llama3; else use SQLCoder
+    modifying_keywords = ["insert", "update", "delete", "alter", "drop", "create", "truncate"]
+    is_modifying = any(user_prompt.strip().lower().startswith(kw) for kw in modifying_keywords)
+
     sql_query = ""
-    llm_error_response = None # To capture natural language error from SQLCoder if it refuses to generate SQL
+    llm_error_response = None
 
     try:
-        sqlcoder_response = ollama.chat(
-            model=OLLAMA_SQLCODER_MODEL,
-            messages=sqlcoder_messages,
-            options={"temperature": 0.0} # Low temperature for deterministic SQL
-        )
-        sql_query_raw_output = sqlcoder_response['message']['content'].strip()
-        
-        # Determine if SQLCoder returned an error message or actual SQL
-        sql_lines = sql_query_raw_output.splitlines()
-        sql_keywords = ("SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP", "TRUNCATE", "WITH")
-        sql_query = "" # Initialize sql_query to empty
-        
-        # Check if any line starts with a SQL keyword (allowing for potential leading blank lines or "thought" before SQL)
-        for line in sql_lines:
-            stripped_line = line.strip().upper()
-            if any(stripped_line.startswith(keyword) for keyword in sql_keywords):
-                sql_query = line.strip() # Capture the first line that looks like SQL
-                break # Stop searching once SQL is found
+        if is_modifying:
+            # Use Llama3 for modifying operations
+            llama3_messages = [
+                {
+                    'role': 'system',
+                    'content': (
+                        "You are an expert PostgreSQL SQL query generator. "
+                        "Given the schema and a user request for a data-modifying operation (INSERT, UPDATE, DELETE, etc.), "
+                        "generate ONLY the SQL query string. Do not include explanations or markdown. and generate query for complete schema and do not include only what is given by the user for adding new data"
+                    )
+                },
+                {
+                    'role': 'user',
+                    'content': (
+                        f"Schema:\n{schema_ddl_statements}\n\n"
+                        f"User Request: {user_prompt}\n\n"
+                        f"Generate ONLY the full (i mean for adding follow entire schema '{schema_ddl_statements}') SQL query (use ILIKE for data validation) for this operation and use the schema of the table '{table_name}' that is '{schema_ddl_statements}' for clarification."
+                    )
+                }
+            ]
+            llama3_response = ollama.chat(
+                model=OLLAMA_LLM_MODEL,
+                messages=llama3_messages,
+                options={"temperature": 0.0}
+            )
+            sql_query_raw_output = llama3_response['message']['content'].strip()
+            print(f"Llama3 (modifying op) response: {sql_query_raw_output}")
+        else:
+            # Use SQLCoder for SELECT and other queries
+            sqlcoder_messages = [
+                {
+                    'role': 'system',
+                    'content': f"{SQLCODER_SYSTEM_PROMPT}\n\nDDL statements for current query context:\n{schema_ddl_statements}"
+                },
+                {
+                    'role': 'user',
+                    'content': f"Generate ONLY  full (i mean follow entire schema '{schema_ddl_statements}' for generating the query and dont use 'AS' unless view is necessary (since ans is only going to be returned try avoid using 'AS') and try to find simple queries) SQL query without any single or double quotes other than for strings and use proper syntax for execution for the following request: '{user_prompt}' and strictly use the schema of the '{table_name}' table  and check if the required column exists else do not generate"
+                }
+            ]
+            sqlcoder_response = ollama.chat(
+                model=OLLAMA_SQLCODER_MODEL,
+                messages=sqlcoder_messages,
+                options={"temperature": 0.0}
+            )
+            sql_query_raw_output = sqlcoder_response['message']['content'].strip()
+            print(f"SQLCoder response: {sql_query_raw_output}")
 
-        if sql_query: # If a SQL query was extracted
-            print(f"Extracted SQL Query: {sql_query}")
-        else: # If no SQL keyword was found, assume it's a natural language refusal
+        # --- Extract SQL query from the response ---
+        sql_lines = sql_query_raw_output.splitlines()
+        print(sql_lines)
+        sql_keywords = ("SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP", "TRUNCATE", "WITH")
+        for line in sql_lines:
+            upper_line = line.upper()
+            for keyword in sql_keywords:
+                idx = upper_line.find(keyword)
+                if idx != -1:
+                    # Check if there is a '(' just before the keyword (e.g., "(SELECT ...")
+                    prefix = line[:idx].rstrip()
+                    if prefix.endswith('('):
+                        sql_query = prefix[-1] + line[idx:].strip()  # add '(' before the SQL
+                    else:
+                        sql_query = line[idx:].strip()
+                    print(f"Extracted SQL query: {sql_query}")
+                    break
+            if sql_query:
+                break
+
+        if not sql_query:
             llm_error_response = sql_query_raw_output
-            print(f"SQLCoder refused to generate SQL: {llm_error_response}")
+            print(f"No valid SQL query found in response: {llm_error_response}")
 
     except requests.exceptions.ConnectionError as e:
-        return jsonify({"error": f"Could not connect to Ollama server at {ollama_host}. Please ensure Ollama is running and the model '{OLLAMA_SQLCODER_MODEL}' is pulled. Error: {e}"}), 503
+        return jsonify({"error": f"Could not connect to Ollama server at {ollama_host}. Please ensure Ollama is running and the model is pulled. Error: {e}"}), 503
     except Exception as e:
-        print(f"Error calling SQLCoder model: {e}")
-        return jsonify({"error": f"SQLCoder model error: {e}"}), 500
+        print(f"Error calling LLM for SQL generation: {e}")
+        return jsonify({"error": f"LLM SQL generation error: {e}"}), 500
 
-    # If SQLCoder refused to generate SQL, return its reason directly
     if llm_error_response:
         response = {
             "summary": llm_error_response,
-            "results": [], # No results as no SQL was generated/executed
+            "results": [],
             "action_status": {}
         }
         if want_sql:
             response["sql_query"] = "N/A - SQL generation refused."
         return jsonify(response)
 
-
-    # --- 3. Execute the SQL query ---
-    results = [] # To store fetched data for SELECT queries
-    action_status = {} # To store info for DML queries (e.g., rows affected)
-    is_select_query = sql_query.strip().upper().startswith("SELECT") if sql_query else False
+    # --- 3. Execute the SQL query (support multiple queries) ---
+    results = []
+    action_status = {}
+    is_select_query = False
+    print(f"Executing SQL query: {sql_query}")
 
     conn = None
     cur = None
     try:
         conn = psycopg2.connect(**db_config)
         cur = conn.cursor()
-        
-        cur.execute(sql_query)
-        
-        if is_select_query:
-            if cur.description: 
-                columns = [desc[0] for desc in cur.description]
-                rows = cur.fetchall()
-                results = [dict(zip(columns, row)) for row in rows]
-                print(f"SELECT query executed successfully. Retrieved {len(results)} rows.")
-                print(results)
-        else: # This is a DML/DDL statement
-            action_status["rows_affected"] = cur.rowcount if hasattr(cur, 'rowcount') else 0 
-            conn.commit() 
-            print(f"Non-SELECT query executed. Rows affected (if applicable): {action_status.get('rows_affected')}")
+
+        # Support multiple SQL statements separated by semicolon
+        queries = [q.strip() for q in sql_query.split(';') if q.strip()]
+        # --- Add ; to end of each query if it does not exist ---
+        queries = [q if q.endswith(';') else q + ';' for q in queries]
+        multi_results = []
+        multi_action_status = []
+
+        for idx, single_query in enumerate(queries):
+            print(f"Executing query {idx+1}: {single_query}")
+            # --- Case-insensitive handling for non-SELECT queries from Llama3 ---
+            # If this is a modifying operation (not SELECT), make sure to compare lowercased
+            query_type = single_query.strip().split()[0].lower() if single_query.strip() else ""
+            is_select_query = query_type == "select" or query_type.startswith("(select")
+            # For modifying operations, ensure case-insensitive execution logic
+            if not is_select_query:
+                # You can add any additional logic here if you want to process/validate further
+                cur.execute(single_query)
+                affected = cur.rowcount if hasattr(cur, 'rowcount') else 0
+                conn.commit()
+                multi_action_status.append({"rows_affected": affected})
+                print(f"Non-SELECT query executed. Rows affected: {affected}")
+            else:
+                cur.execute(single_query)
+                if cur.description:
+                    columns = [desc[0] for desc in cur.description]
+                    rows = cur.fetchall()
+                    result_set = [dict(zip(columns, row)) for row in rows]
+                    multi_results.append(result_set)
+                    print(f"SELECT query executed successfully. Retrieved {len(result_set)} rows.")
+                else:
+                    multi_results.append([])
+
+        # If only one query, keep old structure for backward compatibility
+        if len(queries) == 1:
+            if is_select_query:
+                results = multi_results[0]
+            else:
+                action_status = multi_action_status[0] if multi_action_status else {}
+        else:
+            # For multiple queries, return lists
+            if any(q.strip().upper().startswith("SELECT") for q in queries):
+                results = multi_results
+            if any(not q.strip().upper().startswith("SELECT") for q in queries):
+                action_status = multi_action_status
 
     except psycopg2.Error as e:
         error_message = f"Database execution error: {e.pgcode} - {e.pgerror}"
         print(error_message)
-        if conn: 
-            conn.rollback() 
+        if conn:
+            conn.rollback()
             conn.close()
-        summarize_error_with_llama3(user_prompt, error_message)
-        return jsonify({"error": error_message, "sql_query": sql_query}), 500
+        summary = summarize_error_with_llama3(user_prompt, error_message)
+        return jsonify({"summary": summary, "results": [], "action_status": {}, "sql_query": sql_query}), 500
     except Exception as e:
         print(f"Unexpected SQL execution error: {e}")
-        if conn: 
-            conn.rollback() 
+        if conn:
+            conn.rollback()
             conn.close()
-        return jsonify({"error": f"Unexpected SQL execution error: {e}", "sql_query": sql_query}), 500
+        summary = summarize_error_with_llama3(user_prompt, str(e))
+        return jsonify({"summary": summary, "results": [], "action_status": {}, "sql_query": sql_query}), 500
     finally:
         if cur:
             cur.close()
         if conn:
             conn.close()
 
+    print(f"SQL query executed: {sql_query}")
+
     # --- 4. Summarize results using Llama3 ---
     summary = ""
     try:
         if is_select_query:
-            results_str = json.dumps(results, indent=2) if results else "No data found for this query."
+            results_str = json.loads(json.dumps(results, default=str)) if results else "No data found for this query."
+            print(f"Results to summarize: {results_str}")
             summary_messages = [
                 {
                     'role': 'system',
@@ -228,10 +339,9 @@ def analyze_table_data(db_config, table_name, user_prompt, want_sql=False):
                     )
                 }
             ]
-        else: # DML/DDL operation
+        else:  # DML/DDL operation
             status_info = f"Rows affected: {action_status.get('rows_affected', 'N/A')}" \
-                          if 'rows_affected' in action_status else "Operation completed."
-            
+                if isinstance(action_status, dict) and 'rows_affected' in action_status else "Operation completed."
             summary_messages = [
                 {
                     'role': 'system',
@@ -256,7 +366,7 @@ def analyze_table_data(db_config, table_name, user_prompt, want_sql=False):
         summary_response = ollama.chat(
             model=OLLAMA_LLM_MODEL,
             messages=summary_messages,
-            options={"temperature": 0.7} 
+            options={"temperature": 0.7}
         )
         summary = summary_response['message']['content'].strip()
         print(summary)
@@ -270,11 +380,11 @@ def analyze_table_data(db_config, table_name, user_prompt, want_sql=False):
     response_payload = {
         "summary": summary,
     }
-    if is_select_query:
+    if results:
         response_payload["results"] = results
-    else:
+    if action_status:
         response_payload["action_status"] = action_status
-        
+
     if want_sql:
         response_payload["sql_query"] = sql_query
     print(jsonify(response_payload))
@@ -298,7 +408,7 @@ def summarize_error_with_llama3(user_prompt, error_message):
                 'content': (
                     f"User's request: '{user_prompt}'\n"
                     f"Internal error: {error_message}\n"
-                    f"Please provide a user-friendly explanation."
+                    f"Please provide a user-friendly explanation about what is the error clearly and concisely, without technical jargon or details."
                 )
             }
         ]
