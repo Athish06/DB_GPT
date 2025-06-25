@@ -4,6 +4,7 @@ import ollama
 import psycopg2
 import os
 import json
+import re
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -24,7 +25,7 @@ DB_CONFIG = {
 ollama_host = os.getenv("OLLAMA_HOST", "http://localhost:11500")
 # The ollama client library automatically uses OLLAMA_HOST env var, 
 # but you can explicitly create a client if needed:
-# ollama_client = ollama.Client(host=ollama_host)
+# ollama_client = olloma.Client(host=ollama_host)
 
 OLLAMA_SQLCODER_MODEL = "mannix/defog-llama3-sqlcoder-8b"
 OLLAMA_LLM_MODEL = "llama3" # Or "mistral", "gemma2", etc.
@@ -98,7 +99,8 @@ def analyze_table_data(db_config, table_name, user_prompt, want_sql=False):
 
     except Exception as e:
         print(f"Error fetching schema: {e}")
-        return jsonify({"error": f"Error connecting to database or fetching schema: {e}"}), 500
+        summary = summarize_error_with_llama3(user_prompt, f"Error connecting to database or fetching schema: {e}")
+        return jsonify({"summary": summary, "results": [], "action_status": {}}), 200
     finally:
         if cur:
             cur.close()
@@ -170,7 +172,125 @@ Is this question related to the schema above? Answer only "YES" or "NO".
 
     except Exception as e:
         print(f"Error checking prompt relevance: {e}")
-        return jsonify({"error": "Failed to validate question against schema.", "details": str(e)}), 500
+        summary = summarize_error_with_llama3(user_prompt, f"Failed to validate question against schema. {e}")
+        return jsonify({"summary": summary, "results": [], "action_status": {}}), 200
+
+    # --- NEW STEP: Check if the question requires logical reasoning ---
+    reasoning_check_prompt = f"""
+You are an expert AI assistant for databases. Given the following user question and table schema, decide if the question requires logical reasoning, inference, or analysis that cannot be answered by a direct SQL query alone (e.g., "Is there a pattern...", "Why...", "What can you infer...", "Summarize...", "Find anomalies...", "What is the trend...", etc.).
+If the answer can be retrieved by a simple SQL query (e.g., "Show all users", "Get the age of John"), answer ONLY "NO".
+If the question requires logical reasoning, inference, or advanced analysis, answer ONLY "YES".
+
+Schema:
+{schema_ddl_statements}
+
+User Question:
+"{user_prompt}"
+"""
+    try:
+        reasoning_response = ollama.chat(
+            model=OLLAMA_LLM_MODEL,
+            messages=[{"role": "user", "content": reasoning_check_prompt}],
+            options={"temperature": 0.0}
+        )
+        reasoning_answer = reasoning_response['message']['content'].strip().upper()
+        print(f"Reasoning check response: {reasoning_answer}")
+
+        if reasoning_answer == "YES":
+            # Fetch all data from the table
+            try:
+                conn = psycopg2.connect(**db_config)
+                cur = conn.cursor()
+                cur.execute(f'SELECT * FROM "{table_name}"')
+                columns = [desc[0] for desc in cur.description]
+                rows = cur.fetchall()
+                data = [dict(zip(columns, row)) for row in rows]
+            except Exception as e:
+                print(f"Error fetching data for reasoning: {e}")
+                summary = summarize_error_with_llama3(user_prompt, f"Error fetching data for reasoning: {e}")
+                return jsonify({"summary": summary, "results": [], "action_status": {}}), 200
+            finally:
+                if cur:
+                    cur.close()
+                if conn:
+                    conn.close()
+
+            # Let Llama3 analyze and answer, and ask it to return only relevant data
+            analysis_prompt = [
+                {
+                    'role': 'system',
+                    'content': (
+                        "You are an expert data analyst and assistant. "
+                        "Given the table schema, user question, and table data, analyze the data and provide a clear, concise, and insightful answer to the user's question. "
+                        "If only a subset of the data is relevant to your answer, return ONLY that subset as a JSON array under the key 'relevant_data'. "
+                        "Do NOT include SQL or code in your answer. "
+                        "Your response must be a JSON object with two keys: 'answer' (string) and 'relevant_data' (array or null)."
+                    )
+                },
+                {
+                    'role': 'user',
+                    'content': (
+                        f"Table schema:\n{schema_ddl_statements}\n\n"
+                        f"Analsye the User question: {user_prompt} and try to find some unique and deep ans for the questions like search for some IMPLICIT ans along with the EXPLICIT answer\n\n"
+                        f"Table data (JSON):\n{json.dumps(data, default=str)}"
+                    )
+                }
+            ]
+            try:
+                analysis_response = ollama.chat(
+                    model=OLLAMA_LLM_MODEL,
+                    messages=analysis_prompt,
+                    options={"temperature": 0.7}
+                )
+                content = analysis_response['message']['content'].strip()
+                # Try to extract JSON object from the response
+                match = re.search(r'\{[\s\S]*\}', content)
+                if match:
+                    result_json = json.loads(match.group(0))
+                    answer = result_json.get('answer', '')
+                    relevant_data = result_json.get('relevant_data', None)
+                else:
+                    # fallback: just return the answer as summary, no data
+                    answer = content
+                    relevant_data = []
+
+                # --- Summarize the reasoning answer in natural language (and include SQL if present) ---
+                summary_prompt = [
+                    {
+                        'role': 'system',
+                        'content': (
+                            "You are a helpful assistant specialized in summarizing database analysis results in natural language. "
+                            "Given the user's question, the AI's answer, and any relevant data (and SQL if present), provide a concise, clear summary. "
+                            "If SQL is present, include it in the summary. Do not include raw data unless explicitly asked."
+                        )
+                    },
+                    {
+                        'role': 'user',
+                        'content': (
+                            f"Original Question: '{user_prompt}'\n\n"
+                            f"AI's Answer: {answer}\n\n"
+                            f"Relevant Data: {json.dumps(relevant_data, default=str) if relevant_data else 'None'}"
+                        )
+                    }
+                ]
+                summary_response = ollama.chat(
+                    model=OLLAMA_LLM_MODEL,
+                    messages=summary_prompt,
+                    options={"temperature": 0.7}
+                )
+                summary = summary_response['message']['content'].strip()
+                return jsonify({"summary": summary, "results": relevant_data, "action_status": {}})
+            except Exception as e:
+                print(f"Error generating reasoning answer: {e}")
+                summary = summarize_error_with_llama3(user_prompt, f"Error generating reasoning answer: {e}")
+                return jsonify({"summary": summary, "results": [], "action_status": {}}), 200
+
+        # If NO, continue with your existing SQLCoder/Llama3 SQL logic below
+
+    except Exception as e:
+        print(f"Error during reasoning check: {e}")
+        summary = summarize_error_with_llama3(user_prompt, f"Error during reasoning check: {e}")
+        return jsonify({"summary": summary, "results": [], "action_status": {}}), 200
 
     # --- 2. Decide which LLM to use for SQL generation ---
     # If the user prompt is about modifying operations, use Llama3; else use SQLCoder
@@ -256,7 +376,8 @@ Is this question related to the schema above? Answer only "YES" or "NO".
         return jsonify({"error": f"Could not connect to Ollama server at {ollama_host}. Please ensure Ollama is running and the model is pulled. Error: {e}"}), 503
     except Exception as e:
         print(f"Error calling LLM for SQL generation: {e}")
-        return jsonify({"error": f"LLM SQL generation error: {e}"}), 500
+        summary = summarize_error_with_llama3(user_prompt, f"LLM SQL generation error: {e}")
+        return jsonify({"summary": summary, "results": [], "action_status": {}}), 200
 
     if llm_error_response:
         response = {
@@ -395,14 +516,14 @@ Is this question related to the schema above? Answer only "YES" or "NO".
             conn.rollback()
             conn.close()
         summary = summarize_error_with_llama3(user_prompt, error_message)
-        return jsonify({"summary": summary, "results": [], "action_status": {}, "sql_query": sql_query}), 500
+        return jsonify({"summary": summary, "results": [], "action_status": {}, "sql_query": sql_query}), 200
     except Exception as e:
         print(f"Unexpected SQL execution error: {e}")
         if conn:
             conn.rollback()
             conn.close()
         summary = summarize_error_with_llama3(user_prompt, str(e))
-        return jsonify({"summary": summary, "results": [], "action_status": {}, "sql_query": sql_query}), 500
+        return jsonify({"summary": summary, "results": [], "action_status": {}, "sql_query": sql_query}), 200
     finally:
         if cur:
             cur.close()
@@ -447,6 +568,9 @@ Is this question related to the schema above? Answer only "YES" or "NO".
                         "Based on the user's request and the outcome of the SQL execution, "
                         "provide a clear and concise confirmation message. "
                         "Do not include the SQL query unless explicitly asked."
+                        " Do not include this --The table schema and sample SQL commands are provided to create and insert data into the table unnecessarily."
+
+
                     )
                 },
                 {

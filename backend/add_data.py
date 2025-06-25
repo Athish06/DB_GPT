@@ -53,8 +53,17 @@ def add_data_llama3():
     data = request.get_json()
     db_config = data.get("db_config")
     table_name = data.get("table_name")
-    user_prompt = data.get("user_prompt")  
-    print(table_name, user_prompt)
+    user_prompt = data.get("user_prompt")
+    auto_insert = data.get("auto_insert", False)
+    row_data = data.get("data")
+
+    if auto_insert and row_data:
+        # Directly insert the provided data
+        success, error = new_data(db_config, table_name, row_data)
+        if success:
+            return jsonify({"success": True, "summary": "Data inserted via AI."})
+        else:
+            return jsonify({"success": False, "error": error}), 400
 
     if not db_config or not table_name or not user_prompt:
         return jsonify({"error": "Missing required fields"}), 400
@@ -147,17 +156,17 @@ Is this question related to the schema above? Answer only "YES" or "NO".
             {
                 'role': 'system',
                 'content': (
-                    "You are an expert PostgreSQL SQL query generator. "
-                    "Given the schema and a user request for a data-modifying operation (INSERT), (UPDATE), or (ALTER)"
-                    "generate ONLY the SQL query string. Do not include explanations or markdown."
+                    "You are an expert PostgreSQL data assistant. "
+                    "Given the table schema and a user request, generate ONLY a JSON object mapping column names to values for a new row to be inserted. "
+                    "Do not generate SQL. Do not explain. Only output the JSON object."
                 )
             },
             {
                 'role': 'user',
                 'content': (
                     f"Schema:\n{schema_ddl}\n\n"
-                    f"User Request: {refined_prompt}\n\n"
-                    f"Generate ONLY  full (i mean follow entire schema '{schema_cols}' for generating the query ) and try to find simple queries) INSERT SQL query without any single or double quotes other than for strings and use proper syntax for execution for the following request: '{schema_cols}' and strictly use the schema of the '{table_name}' table  and check if the required column exists else do not generate"
+                    f"User Request: {user_prompt}\n\n"
+                    f"Generate ONLY the JSON object for the new row."
                 )
             }
         ]
@@ -166,30 +175,16 @@ Is this question related to the schema above? Answer only "YES" or "NO".
             messages=llama3_messages,
             options={"temperature": 0.0}
         )
-        sql_query_raw_output = llama3_response['message']['content'].strip()
-        print(f"Llama3 raw SQL output: {sql_query_raw_output}")
-        # Extract SQL query (handle possible parentheses)
-        sql_lines = sql_query_raw_output.splitlines()
-        print(f"SQL lines: {sql_lines}")
-        sql_query = ""
-        sql_keywords = ("INSERT",)
-        for line in sql_lines:
-            upper_line = line.upper()
-            for keyword in sql_keywords:
-                idx = upper_line.find(keyword)
-                if idx != -1:
-                    prefix = line[:idx].rstrip()
-                    if prefix.endswith('('):
-                        sql_query = prefix[-1] + line[idx:].strip()
-                    else:
-                        sql_query = line[idx:].strip()
-                    break
-            if sql_query:
-                break
-        if not sql_query:
-            return jsonify({"error": "No valid SQL INSERT query found in Llama3 response.", "llama3_response": sql_query_raw_output}), 400
+        import json, re
+        content = llama3_response['message']['content']
+        match = re.search(r'\{[\s\S]*\}', content)
+        if match:
+            data_json = json.loads(match.group(0))
+            return jsonify({"data": data_json, "success": True})
+        else:
+            return jsonify({"error": "Could not extract JSON from Llama3 response.", "llama3_response": content}), 400
     except Exception as e:
-        return jsonify({"error": f"Error generating SQL with Llama3: {e}"}), 500
+        return jsonify({"error": f"Error generating data with Llama3: {e}"}), 500
 
     # 4. Execute the query (with up to 3 rounds of Llama3 correction if syntax error)
     max_attempts = 3

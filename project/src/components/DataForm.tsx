@@ -13,6 +13,8 @@ const DataForm: React.FC = () => {
   const [aiPrompt, setAiPrompt] = useState('');
   const [isLoadingAI, setIsLoadingAI] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [showAIPopup, setShowAIPopup] = useState(false);
+  const [aiGeneratedData, setAIGeneratedData] = useState<Record<string, any> | null>(null);
 
   const handleInputChange = (name: string, value: any) => {
     setFormData(prev => ({
@@ -55,12 +57,11 @@ const DataForm: React.FC = () => {
         body: JSON.stringify(payload),
       });
       const result = await response.json();
-      if (result?.success) {
-        setFormData({});
-        setAiPrompt('');
-        // Optionally show a success message
+      if (result?.data) {
+        setAIGeneratedData(result.data); // Store AI-generated data
+        setShowAIPopup(true); // Show the popup
       } else {
-        alert(result?.summary || result?.error || "AI Assistant failed to insert data.");
+        alert(result?.summary || result?.error || "AI Assistant could not generate data.");
       }
     } catch (error) {
       alert("Network or server error during AI-assisted insert.");
@@ -273,6 +274,71 @@ const DataForm: React.FC = () => {
             )}
           </button>
         </form>
+
+        {/* AI Action Popup */}
+        {showAIPopup && (
+          <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-50 z-50">
+            <div className="bg-gray-800 p-6 rounded-lg shadow-lg text-white max-w-sm w-full">
+              <h3 className="text-lg font-bold mb-4">How would you like to add data?</h3>
+              <div className="flex flex-col space-y-3">
+                <button
+                  className="bg-purple-600 hover:bg-purple-700 px-4 py-2 rounded"
+                  onClick={async () => {
+                    // AI Insert: send the data to backend for actual insertion
+                    setShowAIPopup(false);
+                    setIsLoadingAI(true);
+                    if (!credentials) {
+                      alert("Credentials are missing.");
+                      setIsLoadingAI(false);
+                      return;
+                    }
+                    const payload = {
+                      db_config: {
+                        host: credentials.host,
+                        database: selectedDatabase,
+                        user: credentials.username,
+                        password: credentials.password,
+                      },
+                      table_name: selectedTable,
+                      data: aiGeneratedData,
+                      auto_insert: true,
+                    };
+                    try {
+                      const response = await fetch('http://localhost:5000/add_data_ai', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        credentials: 'include',
+                        body: JSON.stringify(payload),
+                      });
+                      const result = await response.json();
+                      if (result?.success) {
+                        setFormData({});
+                        setAiPrompt('');
+                        alert('Data inserted via AI!');
+                      } else {
+                        alert(result?.summary || result?.error || "AI Assistant failed to insert data.");
+                      }
+                    } catch (error) {
+                      alert("Network or server error during AI insert.");
+                    }
+                    setIsLoadingAI(false);
+                  }}
+                >
+                  Add via AI
+                </button>
+                <button
+                  className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded"
+                  onClick={() => {
+                    setFormData(aiGeneratedData || {});
+                    setShowAIPopup(false);
+                  }}
+                >
+                  Add Manually
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
