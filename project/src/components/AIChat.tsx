@@ -34,10 +34,14 @@ const MessageBubble: React.FC<{ message: ChatMessage }> = ({ message }) => {
         <div className="text-[15px] leading-relaxed whitespace-pre-wrap break-words">
           <ReactMarkdown
             components={{
+              // eslint-disable-next-line @typescript-eslint/no-unused-vars
               p: ({ node, ...props }) => <p className="mb-2 last:mb-0" {...props} />,
+              // eslint-disable-next-line @typescript-eslint/no-unused-vars
               strong: ({ node, ...props }) => <strong className="font-bold" {...props} />,
+              // eslint-disable-next-line @typescript-eslint/no-unused-vars
               em: ({ node, ...props }) => <em className="italic" {...props} />,
-              code: ({ node, inline, ...props }: any) => 
+              // eslint-disable-next-line @typescript-eslint/no-unused-vars
+              code: ({ node, inline, ...props }: React.HTMLAttributes<HTMLElement> & { node?: unknown, inline?: boolean }) => 
                 inline ? <code className="bg-black/5 rounded px-1 py-0.5 text-sm font-mono" {...props} /> 
                        : <code className="block bg-black/5 rounded p-2 text-sm font-mono my-2 overflow-x-auto" {...props} />
             }}
