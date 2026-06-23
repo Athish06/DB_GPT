@@ -15,8 +15,9 @@ from services.db_connector import DBConfig, DBType
 from services.encryption import encryption_service
 from services.schema_cache import schema_cache_service
 import asyncio
-from services.agent import run_chat_turn
 from services.conversation import conversation_manager
+from services.redis_client import task_queue, get_job_status
+import uuid
 
 app = Flask(__name__)
 FRONTEND_URL = os.environ.get("FRONTEND_URL")
@@ -257,75 +258,104 @@ def api_chat():
             return jsonify({"error": "Groq API key not set in user settings"}), 403
             
         groq_api_key = encryption_service.decrypt(groq_key_encrypted)
-        db_config = _get_user_db_config(g.user_id, db_id)
-        
-        # Load or create conversation
-        if conversation_id:
-            conversation = conversation_manager.get_conversation(g.user_id, conversation_id)
-            if not conversation:
-                return jsonify({"error": "Conversation not found"}), 404
-        else:
-            conversation = conversation_manager.create_new_conversation(
-                g.user_id, db_id, db_config.database_name, db_config.type.value if hasattr(db_config.type, 'value') else db_config.type, target
-            )
-        
-        conversation_manager.append_message(str(conversation["_id"]), "user", message)
-        
-        # Check cache, introspect if missing
-        schema_data = schema_cache_service.get(g.user_id, db_id)
-        connector = get_connector(db_config)
-        
-        if not schema_data:
-            tables = connector.get_tables_or_collections()
-            schemas = {}
-            for t in tables:
-                try:
-                    schemas[t] = connector.get_schema(t)
-                except Exception as e:
-                    print(f"Failed to fetch schema for {t}: {e}")
-                
-            schema_data = {
-                "sql_schemas": schemas if db_config.type in (DBType.POSTGRESQL, DBType.SUPABASE) else {},
-                "mongo_schemas": schemas if db_config.type == DBType.MONGODB else {}
-            }
-            schema_cache_service.set(g.user_id, db_id, schema_data)
-        
-        # Run agent
-        result = asyncio.run(run_chat_turn(
-            message,
-            {**db_config.__dict__, "type": db_config.type.value if hasattr(db_config.type, 'value') else db_config.type},
-            target,
-            schema_data,
-            conversation,
-            groq_api_key,
-            connector
-        ))
-        
-        connector.close()
-        
-        conversation_manager.append_message(
-            str(conversation["_id"]), 
-            "assistant", 
-            result["reply"], 
-            {
-                "generated_query": result["generated_query"],
-                "query_type": result["query_type"],
-                "result_row_count": result["result_row_count"],
-                "execution_time_ms": result["execution_time_ms"],
-                "error": result["error"]
-            }
+        # Enqueue the background task
+        job_id = str(uuid.uuid4())
+        task_queue.enqueue(
+            'services.agent_worker.execute_agent_task',
+            kwargs={
+                'job_id': job_id,
+                'user_id': g.user_id,
+                'db_id': db_id,
+                'target': target,
+                'message': message,
+                'conversation_id': conversation_id,
+                'groq_api_key': groq_api_key
+            },
+            job_timeout=600  # 10 minutes max for the whole ReAct loop
         )
         
-        # Async compress
-        conversation_manager.maybe_compress(str(conversation["_id"]), groq_api_key)
-        
-        result["conversation_id"] = str(conversation["_id"])
-        return jsonify(result), 200
+        return jsonify({
+            "status": "accepted",
+            "job_id": job_id,
+            "message": "Task queued successfully"
+        }), 202
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/chat/status/<job_id>', methods=['GET'])
+@require_auth
+def api_chat_status(job_id):
+    try:
+        status_data = get_job_status(job_id)
+        if not status_data:
+            return jsonify({"status": "pending"})
+            
+        return jsonify(status_data), 200
         
     except Exception as e:
-        import traceback
-        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
+@app.route('/api/chat/resume/<conversation_id>', methods=['POST'])
+@require_auth
+def api_chat_resume(conversation_id):
+    try:
+        db = get_project_db()
+        user = db.users.find_one({"_id": ObjectId(g.user_id)})
+        groq_key_encrypted = user.get("groq_api_key_encrypted")
+        if not groq_key_encrypted:
+            return jsonify({"error": "Groq API key not set in user settings"}), 403
+            
+        groq_api_key = encryption_service.decrypt(groq_key_encrypted)
+        
+        conversation = conversation_manager.get_conversation(g.user_id, conversation_id)
+        if not conversation:
+            return jsonify({"error": "Conversation not found"}), 404
+            
+        paused_state = conversation.get("paused_state")
+        if not paused_state:
+            return jsonify({"error": "No paused state found for this conversation"}), 400
+            
+        # Enqueue the background task with the resume state
+        job_id = str(uuid.uuid4())
+        task_queue.enqueue(
+            'services.agent_worker.execute_agent_task',
+            kwargs={
+                'job_id': job_id,
+                'user_id': g.user_id,
+                'db_id': conversation["db_id"],
+                'target': conversation["target"],
+                'message': "Resume Request", # The agent ignores this anyway when resume_state is provided
+                'conversation_id': conversation_id,
+                'groq_api_key': groq_api_key,
+                'resume_state': paused_state
+            },
+            job_timeout=600
+        )
+        
+        return jsonify({
+            "status": "accepted",
+            "job_id": job_id,
+            "message": "Resume task queued successfully"
+        }), 202
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/chat/cancel/<conversation_id>', methods=['POST'])
+@require_auth
+def api_chat_cancel(conversation_id):
+    try:
+        conversation = conversation_manager.get_conversation(g.user_id, conversation_id)
+        if not conversation:
+            return jsonify({"error": "Conversation not found"}), 404
+            
+        conversation_manager.clear_paused_state(conversation_id)
+        return jsonify({"status": "success", "message": "Analysis cancelled successfully"}), 200
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 @app.route('/api/settings/groq-key', methods=['POST'])
 @require_auth

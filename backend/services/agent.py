@@ -1,14 +1,18 @@
 import json
 import re
-from typing import Dict, List, Optional, Tuple
-from groq import Groq
+import time
+import asyncio
+from typing import Dict, List, Optional
+from groq import AsyncGroq
 import httpx
+
 from services.db_connector import BaseDBConnector
 from services.result_processor import result_processor
 from services.conversation import conversation_manager
+from services.analytics_engine import execute_analytics_query
+from services.redis_client import set_scratchpad
 
-def format_schema_for_prompt(schema_cache: Dict, target_table: str,
-                              db_type: str) -> str:
+def format_schema_for_prompt(schema_cache: Dict, target_table: str, db_type: str) -> str:
     if db_type in ("postgresql", "supabase"):
         schemas = schema_cache.get("sql_schemas", {})
         if target_table not in schemas:
@@ -38,65 +42,84 @@ def format_schema_for_prompt(schema_cache: Dict, target_table: str,
     return "Schema unavailable"
 
 
-SYSTEM_PROMPT_TEMPLATE = """You are DB_GPT, a precise database assistant.
+SYSTEM_PROMPT_TEMPLATE = """You are DB-GPT, an ultra-advanced database agent.
 
 DATABASE:
 Type: {db_type}
 Name: {db_name}
-Target table/collection: {target}
+Target: {target}
 
 SCHEMA:
 {schema_ddl}
 
-INSTRUCTIONS:
-- Only answer questions related to the database and its data.
-- For PostgreSQL/Supabase: generate valid PostgreSQL SQL.
-- For MongoDB: generate valid pymongo operations as JSON dicts.
-- Never reference tables or columns not shown in the schema.
-- For queries that may return many rows, prefer aggregation.
-- If the question is ambiguous, ask for clarification.
-- Do not generate DROP, TRUNCATE, or ALTER statements unless explicitly asked.
+You run in a loop of THOUGHT, ACTION, and ACTION_INPUT to solve complex analytical questions.
 
-Respond with ONLY this JSON (no markdown, no explanation outside the JSON):
+ALLOWED ACTIONS:
+1. EXECUTE_PRIMARY_QUERY
+- Use this to fetch data from the primary database ({db_type}).
+- For SQL (Postgres/Supabase), provide valid SQL.
+- For MongoDB, provide a JSON dict with find/aggregate operations.
+- ACTION_INPUT format for SQL: {{"sql": "SELECT ..."}}
+- ACTION_INPUT format for MongoDB: {{"mongodb_find": {{"collection": "...", "filter": {{}}}}, "mongodb_pipeline": []}}
+
+2. ANALYZE_CACHE
+- Use this when an observation tells you data is saved to cache.
+- The cache uses DuckDB! You MUST write DuckDB SQL dialect (not Postgres, not MongoDB).
+- ALWAYS use the cache_id directly as the table name in your DuckDB query.
+- If the observation says CACHE_EXPIRED, the data was lost due to ephemeral scaling. You MUST run EXECUTE_PRIMARY_QUERY again to re-fetch the data.
+- ACTION_INPUT format: {{"cache_id": "cache_xyz", "sql": "SELECT ... FROM cache_xyz"}}
+
+3. FINAL_ANSWER
+- Use this when you have gathered all necessary information.
+- ACTION_INPUT format: {{"reply": "The final natural language answer..."}}
+
+RESPONSE FORMAT (Return ONLY valid JSON):
 {{
-  "is_relevant": true,
-  "rejection_reason": null,
-  "needs_query": true,
-  "query_type": "sql | mongodb_find | mongodb_aggregate | none",
-  "sql": "SELECT ... or null",
-  "mongodb_find": {{
-    "collection": "name",
-    "filter": {{}},
-    "projection": {{}},
-    "sort": {{}},
-    "limit": 100
-  }},
-  "mongodb_pipeline": [
-    {{"$match": {{}}}},
-    {{"$group": {{}}}}
-  ],
-  "result_handling_hint": "full | sample_with_stats | aggregate_only",
-  "explanation": "one line describing what this query does"
+  "thought": "Your reasoning about what to do next",
+  "action": "EXECUTE_PRIMARY_QUERY | ANALYZE_CACHE | FINAL_ANSWER",
+  "action_input": {{}}
 }}
 
-If is_relevant is false: set rejection_reason, set all query fields to null.
-If needs_query is false: set all query fields to null, put the direct answer in explanation."""
+EXAMPLES OF A PERFECT LOOP:
+Example 1:
+User: "What is the average age?"
+Assistant: {{"thought": "I need to fetch user data.", "action": "EXECUTE_PRIMARY_QUERY", "action_input": {{"sql": "SELECT age FROM users"}}}}
+Observation: {{"status": "success", "cache_id": "cache_123", "message": "Result too large. Saved to cache. Use ANALYZE_CACHE action with cache_id 'cache_123' and DuckDB SQL."}}
+Assistant: {{"thought": "Data cached. I will average it with DuckDB.", "action": "ANALYZE_CACHE", "action_input": {{"cache_id": "cache_123", "sql": "SELECT AVG(age) FROM cache_123"}}}}
+Observation: [{{"AVG(age)": 34.5}}]
+Assistant: {{"thought": "Got the answer.", "action": "FINAL_ANSWER", "action_input": {{"reply": "The average age is 34.5."}}}}
+"""
 
-def get_groq_client(api_key: str) -> Groq:
-    return Groq(api_key=api_key, http_client=httpx.Client())
+def get_groq_client(api_key: str) -> AsyncGroq:
+    return AsyncGroq(api_key=api_key, http_client=httpx.AsyncClient())
 
 def _extract_json(text: str) -> Dict:
-    """Extract JSON from LLM output, handling common wrapping issues."""
     text = text.strip()
-    # Remove markdown code fences if present
     text = re.sub(r'^```(?:json)?\s*', '', text)
     text = re.sub(r'\s*```$', '', text)
-    # Find first { and last }
     start = text.find('{')
     end = text.rfind('}')
     if start == -1 or end == -1:
-        raise ValueError(f"No JSON object found in response: {text[:200]}")
+        raise ValueError(f"No JSON found: {text[:100]}")
     return json.loads(text[start:end+1])
+
+async def compress_observation(groq: AsyncGroq, raw_obs: str) -> str:
+    """Uses a cheap LLM call to summarize massive errors or data dumps to save context window."""
+    if len(raw_obs) < 2000:
+        return raw_obs
+    try:
+        response = await groq.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": "Summarize this massive database observation/error log into a concise 3-sentence summary for another LLM. Keep key statistics and the exact error root cause."},
+                {"role": "user", "content": raw_obs[:15000]} # Truncate so compressor doesn't OOM
+            ],
+            temperature=0.0,
+            max_tokens=300
+        )
+        return "COMPRESSED OBSERVATION: " + response.choices[0].message.content
+    except Exception:
+        return raw_obs[:2000] + "...[truncated due to length]"
 
 async def run_chat_turn(
     user_message: str,
@@ -105,18 +128,16 @@ async def run_chat_turn(
     schema_cache: Dict,
     conversation: Dict,
     groq_api_key: str,
-    connector: BaseDBConnector
+    connector: BaseDBConnector,
+    job_id: str = None,
+    resume_state: Dict = None
 ) -> Dict:
-    """
-    Run a full agent turn: analyze, query, process, respond.
-    Returns dict with reply, metadata, and updated conversation data.
-    """
+    
     groq = get_groq_client(groq_api_key)
-    db_type = db_config["type"].value if hasattr(db_config["type"], 'value') else db_config["type"]
-    db_name = db_config["database_name"]
+    db_type = db_config.get("type", "")
+    db_name = db_config.get("database_name", "")
 
     schema_ddl = format_schema_for_prompt(schema_cache, target, db_type)
-
     system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
         db_type=db_type,
         db_name=db_name,
@@ -124,175 +145,173 @@ async def run_chat_turn(
         schema_ddl=schema_ddl
     )
 
-    # Build message history for context
-    history_messages = conversation_manager.get_context_for_llm(conversation)
+    if resume_state:
+        scratchpad = resume_state.get("scratchpad", [])
+        # Wake-Up Prompt Injection
+        scratchpad.append({
+            "role": "user",
+            "content": "OBSERVATION: The system was temporarily paused due to API rate limits, but has now been resumed with a new key. Do NOT repeat your previous action if it was already successful. Review your scratchpad and execute the NEXT logical step to reach the FINAL_ANSWER."
+        })
+        final_generated_query = resume_state.get("metrics", {}).get("generated_query")
+        final_query_type = resume_state.get("metrics", {}).get("query_type", "none")
+        final_result_count = resume_state.get("metrics", {}).get("result_row_count", 0)
+        total_exec_time = resume_state.get("metrics", {}).get("execution_time_ms", 0)
+    else:
+        # Long-Term Memory
+        history_messages = conversation_manager.get_context_for_llm(conversation)
+        
+        # Short-Term Scratchpad
+        scratchpad = [
+            {"role": "system", "content": system_prompt},
+            *history_messages,
+            {"role": "user", "content": user_message}
+        ]
+        
+        # Track metrics for final payload
+        final_generated_query = None
+        final_query_type = "none"
+        final_result_count = 0
+        total_exec_time = 0
 
-    # GROQ CALL 1: Analyze + Generate Query
-    call1_messages = [
-        {"role": "system", "content": system_prompt},
-        *history_messages,
-        {"role": "user", "content": user_message}
-    ]
+    TIME_BUDGET = 45.0  # seconds
+    start_time = time.time()
 
-    call1_response = groq.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=call1_messages,
-        temperature=0.0,
-        max_tokens=1000,
-        response_format={"type": "json_object"}
-    )
+    while True:
+        elapsed = time.time() - start_time
+        if elapsed > TIME_BUDGET:
+            scratchpad.append({
+                "role": "user", 
+                "content": "OBSERVATION: SYSTEM TIMEOUT (45s budget reached). You MUST call FINAL_ANSWER immediately with whatever insights you have gathered."
+            })
 
-    try:
-        parsed = _extract_json(call1_response.choices[0].message.content)
-    except ValueError as e:
-        return {
-            "reply": f"Internal agent error: Failed to parse LLM response. {e}",
-            "generated_query": None,
-            "query_type": "none",
-            "result_row_count": None,
-            "execution_time_ms": 0,
-            "error": str(e)
-        }
+        # Save scratchpad state to Redis (for debug/recovery if needed)
+        if job_id:
+            try:
+                set_scratchpad(job_id, json.dumps(scratchpad))
+            except: pass
 
-    # Handle irrelevant questions
-    if not parsed.get("is_relevant", True):
-        reply = (
-            f"This question does not appear to relate to the '{target}' "
-            f"database. {parsed.get('rejection_reason', '')} "
-            f"Please ask something about the data in this database."
-        )
-        return {
-            "reply": reply,
-            "generated_query": None,
-            "query_type": "none",
-            "result_row_count": None,
-            "execution_time_ms": 0,
-            "error": None
-        }
-
-    # Handle questions that need no query (e.g., "what columns does this table have?")
-    if not parsed.get("needs_query", True):
-        return {
-            "reply": parsed.get("explanation", ""),
-            "generated_query": None,
-            "query_type": "none",
-            "result_row_count": None,
-            "execution_time_ms": 0,
-            "error": None
-        }
-
-    # Execute query with retry logic
-    query_type = parsed.get("query_type", "sql")
-    generated_query = None
-    raw_results = []
-    total_count = 0
-    exec_error = None
-    import time
-
-    start_ts = time.time()
-    for attempt in range(3):
+        # 1. Call LLM
         try:
-            if query_type == "sql" and parsed.get("sql"):
-                generated_query = parsed["sql"]
-                raw_results, total_count = connector.execute_sql(generated_query)
-
-            elif query_type == "mongodb_find" and parsed.get("mongodb_find"):
-                op = parsed["mongodb_find"]
-                generated_query = json.dumps(op)
-                raw_results, total_count = connector.execute_mongodb_find(
-                    op.get("collection") or target,
-                    op.get("filter") or {},
-                    op.get("projection") or {},
-                    op.get("sort") or {},
-                    op.get("limit") or 100
-                )
-
-            elif query_type == "mongodb_aggregate" and parsed.get("mongodb_pipeline"):
-                pipeline = parsed["mongodb_pipeline"]
-                mongodb_find = parsed.get("mongodb_find") or {}
-                collection = mongodb_find.get("collection") or target
-                generated_query = json.dumps(pipeline)
-                raw_results, total_count = connector.execute_mongodb_aggregate(
-                    collection, pipeline
-                )
-            exec_error = None
-            break
-
-        except Exception as e:
-            exec_error = str(e)
-            if attempt < 2:
-                # Ask Groq to fix the query
-                fix_response = groq.chat.completions.create(
+            llm_response = await asyncio.wait_for(
+                groq.chat.completions.create(
                     model="llama-3.3-70b-versatile",
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": (
-                            f"The following query failed with error: {exec_error}\n"
-                            f"Query: {generated_query}\n"
-                            f"Original question: {user_message}\n"
-                            f"Fix the query and return the same JSON format."
-                        )}
-                    ],
+                    messages=scratchpad,
                     temperature=0.0,
-                    max_tokens=800,
+                    max_tokens=1000,
                     response_format={"type": "json_object"}
-                )
-                try:
-                    parsed = _extract_json(fix_response.choices[0].message.content)
-                except ValueError:
-                    break # Break if we can't parse the fix response
-
-    exec_time_ms = int((time.time() - start_ts) * 1000)
-
-    if exec_error:
-        return {
-            "reply": f"I generated a query but it failed to execute: {exec_error}. "
-                     f"This may mean the question requires data not available in the current schema.",
-            "generated_query": generated_query,
-            "query_type": query_type,
-            "result_row_count": 0,
-            "execution_time_ms": exec_time_ms,
-            "error": exec_error
-        }
-
-    # Process results based on size
-    hint = parsed.get("result_handling_hint", "full")
-    processed_results = result_processor.process(raw_results, total_count, hint)
-
-    # GROQ CALL 2: Generate natural language response
-    call2_messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are a helpful database assistant. "
-                "Given the user's question, the query that was executed, "
-                "and the query results, provide a clear, concise, "
-                "natural language answer. Do not repeat the raw data unless "
-                "the user specifically asked for it. Highlight key insights."
+                ),
+                timeout=15.0
             )
-        },
-        *history_messages,
-        {"role": "user", "content": (
-            f"Question: {user_message}\n\n"
-            f"Query executed ({query_type}): {generated_query}\n\n"
-            f"Results: {json.dumps(processed_results, default=str)}"
-        )}
-    ]
+            raw_llm_text = llm_response.choices[0].message.content
+            parsed = _extract_json(raw_llm_text)
+            
+            # Append AI's raw thought to scratchpad
+            scratchpad.append({"role": "assistant", "content": raw_llm_text})
+            
+        except asyncio.TimeoutError:
+            scratchpad.append({"role": "user", "content": "OBSERVATION: LLM Timeout. The inference took too long."})
+            continue
+        except Exception as e:
+            error_str = str(e)
+            if "429" in error_str or "rate limit" in error_str.lower() or "too_many_requests" in error_str.lower():
+                return {
+                    "status": "paused_rate_limit",
+                    "scratchpad": scratchpad,
+                    "metrics": {
+                        "generated_query": final_generated_query,
+                        "query_type": final_query_type,
+                        "result_row_count": final_result_count,
+                        "execution_time_ms": total_exec_time
+                    }
+                }
+            scratchpad.append({"role": "user", "content": f"OBSERVATION: Parse/API Error: {error_str}. Fix the JSON."})
+            continue
 
-    call2_response = groq.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=call2_messages,
-        temperature=0.3,
-        max_tokens=1500
-    )
+        action = parsed.get("action")
+        action_input = parsed.get("action_input", {})
+        
+        # 2. Handle FINAL_ANSWER
+        if action == "FINAL_ANSWER":
+            reply = action_input.get("reply", "No reply provided.")
+            return {
+                "reply": reply,
+                "generated_query": final_generated_query,
+                "query_type": final_query_type,
+                "result_row_count": final_result_count,
+                "execution_time_ms": total_exec_time,
+                "error": None
+            }
+            
+        # 3. Handle EXECUTE_PRIMARY_QUERY
+        elif action == "EXECUTE_PRIMARY_QUERY":
+            query_type = "sql" if "sql" in action_input else "mongodb_find" if "mongodb_find" in action_input else "mongodb_aggregate"
+            final_query_type = query_type
+            
+            raw_results = []
+            total_count = 0
+            exec_error = None
+            
+            q_start = time.time()
+            try:
+                if query_type == "sql":
+                    q = action_input.get("sql")
+                    final_generated_query = q
+                    # Use run_in_executor to not block the asyncio event loop with sync driver calls
+                    raw_results, total_count = await asyncio.to_thread(connector.execute_sql, q)
+                elif query_type == "mongodb_find":
+                    op = action_input.get("mongodb_find", {})
+                    final_generated_query = json.dumps(op)
+                    raw_results, total_count = await asyncio.to_thread(
+                        connector.execute_mongodb_find,
+                        op.get("collection", target),
+                        op.get("filter", {}),
+                        op.get("projection", {}),
+                        op.get("sort", {}),
+                        op.get("limit", 100)
+                    )
+                elif query_type == "mongodb_aggregate":
+                    pipeline = action_input.get("mongodb_pipeline", [])
+                    final_generated_query = json.dumps(pipeline)
+                    collection = action_input.get("mongodb_find", {}).get("collection", target)
+                    raw_results, total_count = await asyncio.to_thread(
+                        connector.execute_mongodb_aggregate, collection, pipeline
+                    )
+            except Exception as e:
+                exec_error = str(e)
+                
+            q_end = time.time()
+            total_exec_time += int((q_end - q_start) * 1000)
+            
+            if exec_error:
+                obs = f"Query Execution Error: {exec_error}"
+            else:
+                final_result_count = total_count
+                processed = result_processor.process(raw_results, total_count, hint="full")
+                obs = json.dumps(processed, default=str)
+                
+            # Compress if needed
+            obs = await compress_observation(groq, obs)
+            scratchpad.append({"role": "user", "content": f"OBSERVATION: {obs}"})
 
-    reply = call2_response.choices[0].message.content.strip()
+        # 4. Handle ANALYZE_CACHE
+        elif action == "ANALYZE_CACHE":
+            cache_id = action_input.get("cache_id")
+            duckdb_sql = action_input.get("sql")
+            
+            q_start = time.time()
+            try:
+                # DuckDB execute
+                res = await asyncio.to_thread(execute_analytics_query, cache_id, duckdb_sql)
+                obs = json.dumps(res, default=str)
+            except Exception as e:
+                obs = f"DuckDB Execution Error: {str(e)}"
+            
+            q_end = time.time()
+            total_exec_time += int((q_end - q_start) * 1000)
+            
+            obs = await compress_observation(groq, obs)
+            scratchpad.append({"role": "user", "content": f"OBSERVATION: {obs}"})
 
-    return {
-        "reply": reply,
-        "generated_query": generated_query,
-        "query_type": query_type,
-        "result_row_count": total_count,
-        "execution_time_ms": exec_time_ms,
-        "error": None
-    }
+        # 5. Invalid Action
+        else:
+            scratchpad.append({"role": "user", "content": f"OBSERVATION: Invalid action '{action}'. Allowed: EXECUTE_PRIMARY_QUERY, ANALYZE_CACHE, FINAL_ANSWER."})

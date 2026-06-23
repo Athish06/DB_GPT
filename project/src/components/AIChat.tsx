@@ -10,6 +10,7 @@ interface ChatMessage {
   sqlQuery?: string;
   rawResults?: { rows: number } | null;
   error?: string;
+  isPaused?: boolean;
 }
 
 interface ConversationHistory {
@@ -19,7 +20,11 @@ interface ConversationHistory {
   message_count: number;
 }
 
-const MessageBubble: React.FC<{ message: ChatMessage }> = ({ message }) => {
+const MessageBubble: React.FC<{ 
+  message: ChatMessage; 
+  onResume?: () => void; 
+  onCancel?: () => void; 
+}> = ({ message, onResume, onCancel }) => {
   const [showQuery, setShowQuery] = useState(false);
 
   return (
@@ -50,8 +55,24 @@ const MessageBubble: React.FC<{ message: ChatMessage }> = ({ message }) => {
           </ReactMarkdown>
         </div>
         
-        {(message.sqlQuery || message.rawResults) && (
+        {(message.sqlQuery || message.rawResults || message.isPaused) && (
           <div className="mt-4 flex flex-col space-y-3">
+            {message.isPaused && (
+              <div className="flex items-center space-x-3 mt-2">
+                <button 
+                  onClick={onResume}
+                  className="bg-neutral-900 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-neutral-800 transition-colors shadow-sm"
+                >
+                  Continue Analysis
+                </button>
+                <button 
+                  onClick={onCancel}
+                  className="bg-white text-neutral-900 border border-neutral-300 px-4 py-2 rounded-md text-sm font-medium hover:bg-neutral-50 transition-colors shadow-sm"
+                >
+                  Cancel Analysis
+                </button>
+              </div>
+            )}
             <div className="flex items-center space-x-4 text-xs font-medium text-neutral-500">
               {message.sqlQuery && (
                 <button 
@@ -175,6 +196,27 @@ const AIChat: React.FC = () => {
     }
   };
 
+  const pollJobStatus = async (jobId: string) => {
+    while (true) {
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      const statusResponse = await api.get(`/api/chat/status/${jobId}`);
+      
+      if (statusResponse.status === "completed") {
+        if (statusResponse.conversation_id && !currentConversationId) {
+          setCurrentConversationId(statusResponse.conversation_id);
+        }
+        return { status: "completed", result: statusResponse.result };
+      } else if (statusResponse.status === "paused_rate_limit") {
+        if (statusResponse.conversation_id && !currentConversationId) {
+          setCurrentConversationId(statusResponse.conversation_id);
+        }
+        return { status: "paused_rate_limit", result: null };
+      } else if (statusResponse.status === "failed") {
+        throw new Error(statusResponse.error || "Background task failed.");
+      }
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!question.trim() || !selectedTable || !selectedDatabaseId) return;
@@ -201,20 +243,30 @@ const AIChat: React.FC = () => {
 
       const response = await api.post('/api/chat', payload);
       
-      if (response.conversation_id && !currentConversationId) {
-        setCurrentConversationId(response.conversation_id);
+      if (response.status === "accepted" && response.job_id) {
+        const { status, result } = await pollJobStatus(response.job_id);
+
+        if (status === "paused_rate_limit") {
+          setMessages((prev) => [...prev, {
+            role: 'assistant',
+            content: "⚠️ **Groq API Rate Limit Reached**\n\nThe analysis has been paused mid-execution to prevent data loss. Please update your API key in Settings, then click Continue to resume exactly where we left off.",
+            timestamp: new Date(),
+            isPaused: true
+          }]);
+        } else if (result) {
+          const assistantMessage: ChatMessage = {
+            role: 'assistant',
+            content: result.reply || "No reply generated.",
+            timestamp: new Date(),
+            sqlQuery: result.generated_query,
+            rawResults: result.result_row_count !== undefined ? { rows: result.result_row_count } : null,
+            error: result.error
+          };
+          setMessages((prev) => [...prev, assistantMessage]);
+        }
+      } else {
+        throw new Error(response.error || "Failed to start AI task");
       }
-
-      const assistantMessage: ChatMessage = {
-        role: 'assistant',
-        content: response.reply || "No reply generated.",
-        timestamp: new Date(),
-        sqlQuery: response.generated_query,
-        rawResults: response.result_row_count !== undefined ? { rows: response.result_row_count } : null,
-        error: response.error
-      };
-
-      setMessages((prev) => [...prev, assistantMessage]);
     } catch (error: unknown) {
       const errMsg = error instanceof Error ? error.message : 'Failed to communicate with AI.';
       let displayMsg = errMsg;
@@ -233,6 +285,62 @@ const AIChat: React.FC = () => {
       setIsLoading(false);
     }
   };
+
+  const handleResume = async () => {
+    if (!currentConversationId) return;
+    setIsLoading(true);
+    setMessages(prev => prev.filter(m => !m.isPaused));
+    
+    try {
+      const response = await api.post(`/api/chat/resume/${currentConversationId}`, {});
+      if (response.status === "accepted" && response.job_id) {
+        const { status, result } = await pollJobStatus(response.job_id);
+        
+        if (status === "paused_rate_limit") {
+          setMessages((prev) => [...prev, {
+            role: 'assistant',
+            content: "⚠️ **Groq API Rate Limit Reached**\n\nThe analysis has been paused mid-execution to prevent data loss. Please update your API key in Settings, then click Continue to resume exactly where we left off.",
+            timestamp: new Date(),
+            isPaused: true
+          }]);
+        } else if (result) {
+          const assistantMessage: ChatMessage = {
+            role: 'assistant',
+            content: result.reply || "No reply generated.",
+            timestamp: new Date(),
+            sqlQuery: result.generated_query,
+            rawResults: result.result_row_count !== undefined ? { rows: result.result_row_count } : null,
+            error: result.error
+          };
+          setMessages((prev) => [...prev, assistantMessage]);
+        }
+      } else {
+        throw new Error(response.error || "Failed to resume task");
+      }
+    } catch (error: unknown) {
+      const errMsg = error instanceof Error ? error.message : 'Failed to communicate with AI.';
+      setMessages((prev) => [...prev, { role: 'assistant', content: `Error: ${errMsg}`, timestamp: new Date(), error: errMsg }]);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleCancel = async () => {
+    if (!currentConversationId) return;
+    try {
+      await api.post(`/api/chat/cancel/${currentConversationId}`, {});
+      setMessages(prev => prev.filter(m => !m.isPaused));
+      setMessages(prev => [...prev, {
+        role: 'assistant',
+        content: "Analysis aborted by user.",
+        timestamp: new Date()
+      }]);
+    } catch (error) {
+      console.error("Failed to cancel", error);
+    }
+  };
+
+  const isPausedState = messages.length > 0 && messages[messages.length - 1].isPaused;
 
   return (
     <div className="bg-surface border-l border-surface-border h-full flex flex-col relative overflow-hidden">
@@ -344,7 +452,12 @@ const AIChat: React.FC = () => {
           </div>
         ) : (
           messages.map((message, index) => (
-            <MessageBubble key={index} message={message} />
+            <MessageBubble 
+              key={index} 
+              message={message} 
+              onResume={handleResume}
+              onCancel={handleCancel}
+            />
           ))
         )}
         
@@ -366,13 +479,20 @@ const AIChat: React.FC = () => {
             type="text"
             value={question}
             onChange={(e) => setQuestion(e.target.value)}
-            placeholder={selectedTable ? `Ask about ${selectedTable}...` : "Select a target first"}
-            className="w-full pl-4 pr-24 py-3 bg-neutral-50 border border-neutral-200 rounded-xl text-neutral-900 text-sm focus:outline-none focus:ring-2 focus:ring-neutral-300 transition-shadow"
-            disabled={isLoading || !selectedTable}
+            disabled={!selectedTable || isLoading || isPausedState}
+            placeholder={
+              isPausedState 
+                ? "Analysis paused. Update API key and click Continue above."
+                : (!selectedTable 
+                  ? "Select a target database and table to start querying" 
+                  : "Ask a question about your data..."
+                )
+            }
+            className="w-full pl-4 pr-24 py-3 bg-neutral-50 border border-neutral-200 rounded-xl text-neutral-900 text-sm focus:outline-none focus:ring-2 focus:ring-neutral-300 transition-shadow disabled:opacity-75 disabled:cursor-not-allowed"
           />
           <button
             type="submit"
-            disabled={isLoading || !question.trim() || !selectedTable}
+            disabled={isLoading || !question.trim() || !selectedTable || isPausedState}
             className="absolute right-2 top-2 bottom-2 px-4 bg-neutral-900 text-white text-sm font-medium rounded-lg hover:bg-neutral-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Send

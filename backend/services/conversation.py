@@ -60,6 +60,30 @@ class ConversationManager:
         })
         return result.deleted_count > 0
 
+    def save_paused_state(self, conversation_id: str, state: Dict):
+        """Save a frozen ReAct loop state when a rate limit is hit."""
+        db = get_project_db()
+        db.conversations.update_one(
+            {"_id": ObjectId(conversation_id)},
+            {
+                "$set": {
+                    "paused_state": state,
+                    "updated_at": datetime.utcnow()
+                }
+            }
+        )
+
+    def clear_paused_state(self, conversation_id: str):
+        """Clear the frozen ReAct loop state."""
+        db = get_project_db()
+        db.conversations.update_one(
+            {"_id": ObjectId(conversation_id)},
+            {
+                "$unset": {"paused_state": ""},
+                "$set": {"updated_at": datetime.utcnow()}
+            }
+        )
+
     def append_message(self, conversation_id: str, role: str,
                         content: str, metadata: Optional[Dict] = None):
         db = get_project_db()

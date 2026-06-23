@@ -1,52 +1,49 @@
 import random
+import uuid
 from collections import Counter
 from typing import List, Dict, Any
+from services.parquet_manager import save_to_parquet
 
 class ResultProcessor:
-    FULL_THRESHOLD = 50
-    SAMPLE_THRESHOLD = 500
+    FULL_THRESHOLD = 100
     MAX_VALUE_LENGTH = 300
 
     def process(self, results: List[Dict], total_count: int, hint: str) -> Dict:
         if not results:
             return {
+                "status": "success",
                 "mode": "empty",
                 "total_count": total_count,
                 "message": "The query returned no results."
             }
 
         n = len(results)
+        clean_results = self._truncate(results)
 
-        if hint == "aggregate_only" or total_count > self.SAMPLE_THRESHOLD:
+        if hint == "aggregate_only" or n > self.FULL_THRESHOLD:
+            # Route large payloads to Parquet
+            cache_id = f"cache_{uuid.uuid4().hex[:8]}"
+            save_to_parquet(cache_id, clean_results)
+            
+            # Send Data Profile (Observation) to LLM
+            head = clean_results[:5]
             return {
-                "mode": "aggregate_summary",
-                "statistics": self._compute_stats(results),
-                "total_count": total_count,
-                "note": f"Query matched {total_count} records. Showing statistics only."
+                "status": "success",
+                "mode": "cached_profile",
+                "rows_retrieved": n,
+                "total_count_in_db": total_count,
+                "cache_id": cache_id,
+                "preview": head,
+                "statistics": self._compute_stats(clean_results),
+                "message": f"Result too large ({n} rows). Saved to cache. Use ANALYZE_CACHE action with cache_id '{cache_id}' and DuckDB SQL."
             }
-
-        if n <= self.FULL_THRESHOLD:
-            return {
-                "mode": "full",
-                "data": self._truncate(results),
-                "row_count": n,
-                "total_count": total_count
-            }
-
-        # Sample mode
-        head = results[:5]
-        tail = results[-5:]
-        middle_pool = results[5:-5]
-        middle_sample = random.sample(middle_pool, min(10, len(middle_pool)))
-        sample = head + middle_sample + tail
 
         return {
-            "mode": "sample",
-            "sample_rows": self._truncate(sample),
-            "statistics": self._compute_stats(results),
+            "status": "success",
+            "mode": "full",
+            "data": clean_results,
             "row_count": n,
-            "total_count": total_count,
-            "note": f"Showing {len(sample)} representative rows from {n} results."
+            "total_count": total_count
         }
 
     def _compute_stats(self, results: List[Dict]) -> Dict:
