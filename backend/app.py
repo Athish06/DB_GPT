@@ -19,8 +19,11 @@ from services.agent import run_chat_turn
 from services.conversation import conversation_manager
 
 app = Flask(__name__)
-FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:5173")
-CORS(app, supports_credentials=True, origins=[FRONTEND_URL])
+FRONTEND_URL = os.environ.get("FRONTEND_URL")
+if FRONTEND_URL:
+    CORS(app, supports_credentials=True, origins=[FRONTEND_URL])
+else:
+    CORS(app, supports_credentials=True)
 
 # Initialize MongoDB collections and indexes lazily to prevent Werkzeug Windows socket crashes
 _indexes_initialized = False

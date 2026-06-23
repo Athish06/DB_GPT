@@ -2,68 +2,50 @@ import React, { useState } from 'react';
 import { Plus, Sparkles, Save } from 'lucide-react';
 import { useDatabase } from '../contexts/DatabaseContext';
 import LoadingSpinner from './ui/LoadingSpinner';
+import { api } from '../services/api';
 
 const DataForm: React.FC = () => {
   const databaseContext = useDatabase();
   const selectedTable = databaseContext?.selectedTable;
   const tableData = databaseContext?.tableData;
-  const credentials = databaseContext?.credentials;
-  const selectedDatabase = databaseContext?.selectedDatabase;
-  const [formData, setFormData] = useState<Record<string, any>>({});
+  const selectedDatabaseId = databaseContext?.selectedDatabaseId;
+  const [formData, setFormData] = useState<Record<string, unknown>>({});
   const [aiPrompt, setAiPrompt] = useState('');
   const [isLoadingAI, setIsLoadingAI] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showAIPopup, setShowAIPopup] = useState(false);
-  const [aiGeneratedData, setAIGeneratedData] = useState<Record<string, any> | null>(null);
+  const [aiGeneratedData, setAIGeneratedData] = useState<Record<string, unknown> | null>(null);
 
-  const handleInputChange = (name: string, value: any) => {
+  const handleInputChange = (name: string, value: unknown) => {
     setFormData(prev => ({
       ...prev,
       [name]: value
     }));
   };
 
-  const handleAIGenerate = async () => {
-    if (!aiPrompt.trim() || !tableData) return;
 
-    setIsLoadingAI(true);
-    // ...your AI logic here...
-    setIsLoadingAI(false);
-  };
 
   const handleAIAssistedInsert = async () => {
-    if (!aiPrompt.trim() || !selectedTable || !credentials || !selectedDatabase) return;
+    if (!aiPrompt.trim() || !selectedTable || !selectedDatabaseId) return;
 
     setIsLoadingAI(true);
 
-    const payload = {
-      db_config: {
-        host: credentials.host,
-        database: selectedDatabase,
-        user: credentials.username,
-        password: credentials.password,
-      },
+    const payload: Record<string, unknown> = {
+      db_id: selectedDatabaseId,
       table_name: selectedTable,
       user_prompt: aiPrompt,
     };
 
     try {
-      const response = await fetch('http://localhost:5000/add_data_ai', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        credentials: 'include',
-        body: JSON.stringify(payload),
-      });
-      const result = await response.json();
+      const result = await api.post('/add_data_ai', payload);
       if (result?.data) {
-        setAIGeneratedData(result.data); // Store AI-generated data
+        setAIGeneratedData(result.data as Record<string, unknown>); // Store AI-generated data
         setShowAIPopup(true); // Show the popup
       } else {
         alert(result?.summary || result?.error || "AI Assistant could not generate data.");
       }
-    } catch (error) {
+    } catch (err) {
+      console.error(err);
       alert("Network or server error during AI-assisted insert.");
     }
 
@@ -72,37 +54,25 @@ const DataForm: React.FC = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedTable || !credentials) return;
+    if (!selectedTable || !selectedDatabaseId) return;
 
     setIsSubmitting(true);
-    const payload = {
-      db_config: {
-        host: credentials.host,
-        database: selectedDatabase,
-        user: credentials.username,
-        password: credentials.password,
-      },
+    const payload: Record<string, unknown> = {
+      db_id: selectedDatabaseId,
       table_name: selectedTable,
       data: formData,
     };
 
     try {
-      const response = await fetch('http://localhost:5000/add_data', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        credentials: 'include',
-        body: JSON.stringify(payload),
-      });
-      const result = await response.json();
+      const result = await api.post('/add_data', payload);
       if (result?.success) {
         setFormData({});
         // Optionally show a success message
       } else {
         // Optionally show an error message
       }
-    } catch (error) {
+    } catch (err) {
+      console.error(err);
       // Optionally show an error message
     }
     setIsSubmitting(false);
@@ -170,7 +140,7 @@ const DataForm: React.FC = () => {
                   inputField = (
                     <input
                       type="number"
-                      value={formData[column.name] || ''}
+                      value={(formData[column.name] as string | number) || ''}
                       onChange={(e) => handleInputChange(column.name, e.target.value ? Number(e.target.value) : '')}
                       required={isRequired}
                       placeholder={`Enter ${column.name}`}
@@ -182,7 +152,7 @@ const DataForm: React.FC = () => {
                     <input
                       type="number"
                       step="any"
-                      value={formData[column.name] || ''}
+                      value={(formData[column.name] as string | number) || ''}
                       onChange={(e) => handleInputChange(column.name, e.target.value ? Number(e.target.value) : '')}
                       required={isRequired}
                       placeholder={`Enter ${column.name}`}
@@ -206,27 +176,23 @@ const DataForm: React.FC = () => {
                   inputField = (
                     <input
                       type="datetime-local"
-                      value={formData[column.name] || ''}
+                      value={(formData[column.name] as string) || ''}
                       onChange={(e) => handleInputChange(column.name, e.target.value)}
                       required={isRequired}
                       placeholder={`Enter ${column.name}`}
                       className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                     />
                   );
-                } else if (colType.includes('enum') && Array.isArray(column.enumValues)) {
+                } else if (colType.includes('enum') && 'enumValues' in column && Array.isArray((column as Record<string, unknown>).enumValues)) {
                   inputField = (
                     <select
-                      value={formData[column.name] || ''}
+                      value={String(formData[column.name] || '')}
                       onChange={(e) => handleInputChange(column.name, e.target.value)}
                       required={isRequired}
                       className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                     >
                       <option value="">Select...</option>
-                      {(
-                        typeof column.enumValues === 'function'
-                          ? (column.enumValues([]) as string[])
-                          : (column.enumValues as unknown as string[])
-                      ).map((val: string) => (
+                      {((column as Record<string, unknown>).enumValues as string[]).map((val: string) => (
                         <option key={val} value={val}>{val}</option>
                       ))}
                     </select>
@@ -236,7 +202,7 @@ const DataForm: React.FC = () => {
                   inputField = (
                     <input
                       type="text"
-                      value={formData[column.name] || ''}
+                      value={(formData[column.name] as string | number) || ''}
                       onChange={(e) => handleInputChange(column.name, e.target.value)}
                       required={isRequired}
                       placeholder={`Enter ${column.name}`}
@@ -287,30 +253,19 @@ const DataForm: React.FC = () => {
                     // AI Insert: send the data to backend for actual insertion
                     setShowAIPopup(false);
                     setIsLoadingAI(true);
-                    if (!credentials) {
-                      alert("Credentials are missing.");
+                    if (!selectedDatabaseId) {
+                      alert("Database not selected.");
                       setIsLoadingAI(false);
                       return;
                     }
-                    const payload = {
-                      db_config: {
-                        host: credentials.host,
-                        database: selectedDatabase,
-                        user: credentials.username,
-                        password: credentials.password,
-                      },
+                    const payload: Record<string, unknown> = {
+                      db_id: selectedDatabaseId,
                       table_name: selectedTable,
                       data: aiGeneratedData,
                       auto_insert: true,
                     };
                     try {
-                      const response = await fetch('http://localhost:5000/add_data_ai', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        credentials: 'include',
-                        body: JSON.stringify(payload),
-                      });
-                      const result = await response.json();
+                      const result = await api.post('/add_data_ai', payload);
                       if (result?.success) {
                         setFormData({});
                         setAiPrompt('');
@@ -318,7 +273,8 @@ const DataForm: React.FC = () => {
                       } else {
                         alert(result?.summary || result?.error || "AI Assistant failed to insert data.");
                       }
-                    } catch (error) {
+                    } catch (err) {
+                      console.error(err);
                       alert("Network or server error during AI insert.");
                     }
                     setIsLoadingAI(false);
