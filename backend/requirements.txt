@@ -12,3 +12,5 @@ pandas
 pyarrow
 gunicorn
 Flask-CORS
+Flask
+python-dotenv
