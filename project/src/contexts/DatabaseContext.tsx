@@ -1,40 +1,33 @@
+/* eslint-disable react-refresh/only-export-components */
 import React, { createContext, useContext, useState } from 'react';
+import { api } from '../services/api';
 
-export interface DatabaseCredentials {
-  type: 'postgresql' | 'mysql' | 'mongodb';
+interface DatabaseConnection {
+  db_id: string;
+  display_name: string;
+  type: string;
+  database_name: string;
   host: string;
   port: number;
-  username: string;
-  password: string;
-  database: string;
+  connection_status: string;
 }
 
-export interface TableInfo {
-  name: string;
-  type: 'table' | 'collection';
-  columns?: Array<{ name: string; type: string; nullable: boolean }>;
-}
-
-export interface TableData {
-  schema: Array<{
-    enumValues(enumValues: any): unknown; name: string; type: string; nullable: boolean 
-}>;
-  rows: Array<Record<string, any>>;
+interface TableData {
+  schema: Array<{ name: string; type: string; nullable: boolean }>;
+  rows: Array<Record<string, unknown>>;
 }
 
 interface DatabaseContextType {
-  credentials: DatabaseCredentials | null;
-  setCredentials: (credentials: DatabaseCredentials) => void;
-  isConnected: boolean;
-  setIsConnected: (connected: boolean) => void;
-  tables: TableInfo[];
-  setTables: (tables: TableInfo[]) => void;
+  databases: DatabaseConnection[];
+  fetchDatabases: () => Promise<void>;
+  selectedDatabaseId: string | null;
+  setSelectedDatabaseId: (id: string | null) => void;
+  tables: string[];
+  setTables: (tables: string[]) => void;
   selectedTable: string | null;
   setSelectedTable: (table: string | null) => void;
   tableData: TableData | null;
   setTableData: (data: TableData | null) => void;
-  selectedDatabase: string;
-  setSelectedDatabase: (db: string) => void;
 }
 
 const DatabaseContext = createContext<DatabaseContextType | undefined>(undefined);
@@ -42,26 +35,34 @@ const DatabaseContext = createContext<DatabaseContextType | undefined>(undefined
 export const useDatabase = () => useContext(DatabaseContext);
 
 export const DatabaseProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [credentials, setCredentials] = useState<DatabaseCredentials | null>(null);
-  const [isConnected, setIsConnected] = useState(false);
-  const [tables, setTables] = useState<TableInfo[]>([]);
+  const [databases, setDatabases] = useState<DatabaseConnection[]>([]);
+  const [selectedDatabaseId, setSelectedDatabaseId] = useState<string | null>(null);
+  const [tables, setTables] = useState<string[]>([]);
   const [selectedTable, setSelectedTable] = useState<string | null>(null);
   const [tableData, setTableData] = useState<TableData | null>(null);
-  const [selectedDatabase, setSelectedDatabase] = useState<string>("");
+
+  const fetchDatabases = async () => {
+    try {
+      const res = await api.get('/databases');
+      if (res.databases) {
+        setDatabases(res.databases);
+      }
+    } catch (e) {
+      console.error("Failed to fetch databases", e);
+    }
+  };
 
   const value = {
-    credentials,
-    setCredentials,
-    isConnected,
-    setIsConnected,
+    databases,
+    fetchDatabases,
+    selectedDatabaseId,
+    setSelectedDatabaseId,
     tables,
     setTables,
     selectedTable,
     setSelectedTable,
     tableData,
-    setTableData,
-    selectedDatabase,
-    setSelectedDatabase
+    setTableData
   };
 
   return (

@@ -164,7 +164,7 @@ const DataForm: React.FC = () => {
               .map((column) => {
                 const colType = column.type.toLowerCase();
                 const isRequired = !column.nullable;
-                let inputField = null;
+                let inputField: React.ReactNode = null;
 
                 if (colType.includes('int') || colType.includes('number')) {
                   inputField = (

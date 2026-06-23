@@ -1,26 +1,45 @@
 import os
-import psycopg2
 import jwt
 import datetime
 import bcrypt
-from flask import request, jsonify
+from functools import wraps
+from flask import request, jsonify, g
 from dotenv import dotenv_values
-from database_connection import connect_postgresql_from_json
+from db.mongo_client import get_project_db
+from bson import ObjectId
+from services.connector_factory import get_connector
+from services.db_connector import DBConfig, DBType
+from services.encryption import encryption_service
 
-# Load .env variables using dotenv_values
+# Load .env variables
 env = dotenv_values(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
 JWT_SECRET = env.get("JWT_SECRET", "your_jwt_secret")
-JWT_ALGORITHM = "HS256"
+JWT_ALGORITHM = env.get("JWT_ALGORITHM", "HS256")
 
-def get_db_connection():
-    return psycopg2.connect(
-        host=env.get("DB_HOST"),
-        port=env.get("DB_PORT"),
-        user=env.get("DB_USER"),
-        password=env.get("DB_PASSWORD").strip("'"),
-        dbname=env.get("DB_NAME"),
-    )
+def require_auth(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = request.cookies.get('jwt_token')
+        if not token:
+            # Fallback to Authorization header if provided
+            auth_header = request.headers.get('Authorization')
+            if auth_header and auth_header.startswith('Bearer '):
+                token = auth_header.split(' ')[1]
+                
+        if not token:
+            return jsonify({"error": "Missing or invalid token"}), 401
+        try:
+            payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            g.user_id = payload['user_id']
+            g.email = payload['email']
+        except jwt.ExpiredSignatureError:
+            return jsonify({"error": "Token has expired"}), 401
+        except jwt.InvalidTokenError:
+            return jsonify({"error": "Invalid token"}), 401
+            
+        return f(*args, **kwargs)
+    return decorated
 
 def login_api():
     """
@@ -35,67 +54,81 @@ def login_api():
         return jsonify({"error": "Missing email or password"}), 400
 
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        # Authenticate user
-        cur.execute("SELECT email, password FROM auth WHERE email = %s", (email,))
-        user = cur.fetchone()
-        if not user or not bcrypt.checkpw(password.encode('utf-8'), user[1].encode('utf-8')):
-            cur.close()
-            conn.close()
+        db = get_project_db()
+        user = db.users.find_one({"email": email})
+        
+        if not user or not bcrypt.checkpw(password.encode('utf-8'), user['password_hash'].encode('utf-8')):
             return jsonify({"error": "Invalid credentials"}), 401
 
         # Fetch all database connections for this user
-        cur.execute("""
-            SELECT database_name, host, user_name, password, port
-            FROM database_details
-            WHERE name = %s
-        """, (email,))
-        db_rows = cur.fetchall()
-        databases = [
-            {
-                "database_name": row[0],
-                "host": row[1],
-                "user_name": row[2],
-                "password": row[3],
-                "port": row[4]
-            }
-            for row in db_rows
-        ]
-        cur.close()
-        conn.close()
-
-        # Check connection status for each database
+        databases = user.get("databases", [])
+        
         connection_statuses = []
-        for db in databases:
-            conn = connect_postgresql_from_json({
-                "host": db["host"],
-                "database": db["database_name"],
-                "user": db["user_name"],
-                "password": db["password"],
-                "port": db["port"]
-            })
-            db["connection_status"] = "connected" if conn else "failed"
-            if conn:
-                conn.close()
-            connection_statuses.append(db)
+        for db_entry in databases:
+            db_config = DBConfig(
+                type=DBType(db_entry["type"]),
+                host=db_entry["host"],
+                port=db_entry["port"],
+                database_name=db_entry["database_name"],
+                username=encryption_service.decrypt(db_entry["username_encrypted"]) if db_entry.get("username_encrypted") else "",
+                password=encryption_service.decrypt(db_entry["password_encrypted"]) if db_entry.get("password_encrypted") else "",
+                ssl_required=db_entry.get("ssl_required", False),
+                connection_string=(
+                    encryption_service.decrypt(db_entry["connection_string_encrypted"])
+                    if db_entry.get("connection_string_encrypted") else None
+                )
+            )
+            
+            connector = None
+            try:
+                connector = get_connector(db_config)
+                success, _ = connector.test_connection()
+            except Exception:
+                success = False
+            finally:
+                if connector:
+                    connector.close()
+            
+            # Safe DB entry without passwords
+            safe_db = {
+                "db_id": str(db_entry["db_id"]),
+                "display_name": db_entry.get("display_name", db_entry["database_name"]),
+                "type": db_entry["type"],
+                "database_name": db_entry["database_name"],
+                "host": db_entry["host"],
+                "port": db_entry["port"],
+                "ssl_required": db_entry.get("ssl_required", False),
+                "created_at": db_entry.get("created_at"),
+                "connection_status": "connected" if success else "failed"
+            }
+            connection_statuses.append(safe_db)
 
         # Generate JWT
         payload = {
-            "user_id": user[0],
-            "email": user[0],
+            "user_id": str(user["_id"]),
+            "email": email,
             "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=24)
         }
         token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
-        return jsonify({
-            "token": token,
+        response = jsonify({
             "user": {
-                "id": user[0],
-                "email": user[0]
+                "id": str(user["_id"]),
+                "email": email
             },
             "databases": connection_statuses
-        }), 200
+        })
+        
+        # Set HttpOnly cookie
+        response.set_cookie(
+            "jwt_token",
+            token,
+            httponly=True,
+            samesite="Lax",
+            secure=False,  # Set to True in production with HTTPS
+            max_age=86400  # 24 hours
+        )
+        return response, 200
 
     except Exception as e:
         print("Login error:", e)
@@ -114,21 +147,29 @@ def signup_api():
         return jsonify({"error": "Missing email or password"}), 400
 
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
+        db = get_project_db()
         # Check if user already exists
-        cur.execute("SELECT email FROM auth WHERE email = %s", (email,))
-        if cur.fetchone():
-            cur.close()
-            conn.close()
+        if db.users.find_one({"email": email}):
             return jsonify({"error": "User already exists"}), 409
 
         # Insert new user
         hashed_pw = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
-        cur.execute("INSERT INTO auth (email, password) VALUES (%s, %s)", (email, hashed_pw.decode('utf-8')))
-        conn.commit()
-        cur.close()
-        conn.close()
+        
+        new_user = {
+            "email": email,
+            "password_hash": hashed_pw.decode('utf-8'),
+            "created_at": datetime.datetime.utcnow(),
+            "updated_at": datetime.datetime.utcnow(),
+            "databases": [],
+            "groq_api_key_encrypted": None,
+            "settings": {
+                "default_result_limit": 100,
+                "max_context_messages": 10,
+                "preferred_model": "llama-3.3-70b-versatile"
+            }
+        }
+        
+        db.users.insert_one(new_user)
         return jsonify({"status": "success"}), 201
     except Exception as e:
         print("Signup error:", e)

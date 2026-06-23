@@ -1,54 +1,179 @@
-import React, { useState, useEffect } from 'react';
-import { MessageSquare, Send, Sparkles } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useDatabase } from '../contexts/DatabaseContext';
-import LoadingSpinner from './ui/LoadingSpinner';
+import { api } from '../services/api';
+import ReactMarkdown from 'react-markdown';
 
-interface QueryResult {
-  query: string;
-  explanation: string;
+interface ChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
   timestamp: Date;
+  sqlQuery?: string;
+  rawResults?: { rows: number } | null;
+  error?: string;
 }
+
+interface ConversationHistory {
+  _id: string;
+  target: string;
+  updated_at: string;
+  message_count: number;
+}
+
+const MessageBubble: React.FC<{ message: ChatMessage }> = ({ message }) => {
+  const [showQuery, setShowQuery] = useState(false);
+
+  return (
+    <div className={`flex flex-col ${message.role === 'user' ? 'items-end' : 'items-start'}`}>
+      <div
+        className={`max-w-[85%] rounded-2xl px-5 py-3 ${
+          message.role === 'user'
+            ? 'bg-neutral-900 text-white rounded-br-sm'
+            : 'bg-neutral-100 text-neutral-900 rounded-bl-sm border border-neutral-200'
+        }`}
+      >
+        <div className="text-[15px] leading-relaxed whitespace-pre-wrap break-words">
+          <ReactMarkdown
+            components={{
+              p: ({ node, ...props }) => <p className="mb-2 last:mb-0" {...props} />,
+              strong: ({ node, ...props }) => <strong className="font-bold" {...props} />,
+              em: ({ node, ...props }) => <em className="italic" {...props} />,
+              code: ({ node, inline, ...props }: any) => 
+                inline ? <code className="bg-black/5 rounded px-1 py-0.5 text-sm font-mono" {...props} /> 
+                       : <code className="block bg-black/5 rounded p-2 text-sm font-mono my-2 overflow-x-auto" {...props} />
+            }}
+          >
+            {message.content}
+          </ReactMarkdown>
+        </div>
+        
+        {(message.sqlQuery || message.rawResults) && (
+          <div className="mt-4 flex flex-col space-y-3">
+            <div className="flex items-center space-x-4 text-xs font-medium text-neutral-500">
+              {message.sqlQuery && (
+                <button 
+                  onClick={() => setShowQuery(!showQuery)}
+                  className="hover:text-neutral-700 uppercase tracking-wider transition-colors font-semibold"
+                >
+                  EXECUTED QUERY
+                </button>
+              )}
+              {message.rawResults && message.role === 'assistant' && (
+                <span>Processed {message.rawResults.rows} records.</span>
+              )}
+            </div>
+            {showQuery && message.sqlQuery && (
+              <div className="bg-white border border-neutral-200 p-3 rounded-lg text-xs font-mono text-neutral-700 overflow-x-auto shadow-sm">
+                <div className="font-semibold text-neutral-400 mb-2 uppercase tracking-wider text-[10px]">Executed Query</div>
+                {message.sqlQuery}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
 
 const AIChat: React.FC = () => {
   const dbContext = useDatabase();
   const selectedTable = dbContext?.selectedTable;
-  const selectedDatabase = dbContext?.selectedDatabase;
-  const credentials = dbContext?.credentials;
-  const tables = dbContext?.tables;
+  const selectedDatabaseId = dbContext?.selectedDatabaseId;
   const [question, setQuestion] = useState('');
-  const [results, setResults] = useState<QueryResult[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
-
-  // --- DESIGN UPGRADE: Chat bubble style, user/assistant roles, timestamps, SQL, etc. ---
-  interface ChatMessage {
-    role: 'user' | 'assistant';
-    content: string;
-    timestamp: Date;
-    sqlQuery?: string;
-    rawResults?: any;
-    error?: string;
-  }
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  
+  // History states
+  const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
+  const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [historyList, setHistoryList] = useState<ConversationHistory[]>([]);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
 
-  // Add an initial welcome message when the component mounts or table changes
   useEffect(() => {
-    if (selectedTable && messages.length === 0) {
+    if (selectedTable) {
+      startNewChat();
+    } else {
+      setMessages([]);
+      setCurrentConversationId(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedTable]);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, isLoading]);
+
+  const startNewChat = () => {
+    setCurrentConversationId(null);
+    if (selectedTable) {
       setMessages([
         {
           role: 'assistant',
-          content: `Hello! I'm your AI database assistant. I can help you query the '${selectedTable}' table in natural language.`,
+          content: `Hello. I am connected to '${selectedTable}'. How can I help you analyze this data?`,
           timestamp: new Date(),
         },
       ]);
-    } else if (!selectedTable && messages.length > 0 && messages[0].content.includes("Hello! I'm your AI database assistant.")) {
-      setMessages([]);
     }
-    // eslint-disable-next-line
-  }, [selectedTable]);
+  };
+
+  const loadHistoryList = async () => {
+    if (!selectedDatabaseId || !selectedTable) return;
+    setIsLoadingHistory(true);
+    try {
+      const response = await api.get(`/api/conversations?db_id=${selectedDatabaseId}&target=${selectedTable}`);
+      setHistoryList(response);
+    } catch (err) {
+      console.error("Failed to load history", err);
+    } finally {
+      setIsLoadingHistory(false);
+    }
+  };
+
+  const handleHistoryOpen = () => {
+    setIsHistoryOpen(true);
+    loadHistoryList();
+  };
+
+  const loadConversation = async (id: string) => {
+    setIsHistoryOpen(false);
+    setCurrentConversationId(id);
+    setIsLoading(true);
+    setMessages([]);
+    try {
+      const response = await api.get(`/api/conversations/${id}`);
+      const loadedMessages: ChatMessage[] = response.messages.map((m: { role: 'user'|'assistant'; content: string; timestamp: string; metadata?: { generated_query?: string; result_row_count?: number; error?: string; } }) => ({
+        role: m.role,
+        content: m.content,
+        timestamp: new Date(m.timestamp),
+        sqlQuery: m.metadata?.generated_query,
+        rawResults: m.metadata?.result_row_count !== undefined ? { rows: m.metadata.result_row_count } : null,
+        error: m.metadata?.error
+      }));
+      setMessages(loadedMessages);
+    } catch (err) {
+      console.error("Failed to load conversation", err);
+      startNewChat();
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const deleteConversation = async (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    try {
+      await api.delete(`/api/conversations/${id}`);
+      setHistoryList(prev => prev.filter(c => c._id !== id));
+      if (currentConversationId === id) {
+        startNewChat();
+      }
+    } catch (err) {
+      console.error("Failed to delete conversation", err);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!question.trim() || !selectedTable || !selectedDatabase || !credentials) return;
+    if (!question.trim() || !selectedTable || !selectedDatabaseId) return;
 
     const currentUserMessage: ChatMessage = {
       role: 'user',
@@ -56,172 +181,197 @@ const AIChat: React.FC = () => {
       timestamp: new Date(),
     };
 
-    setMessages((prevMessages) => [...prevMessages, currentUserMessage]);
+    setMessages((prev) => [...prev, currentUserMessage]);
     setQuestion('');
     setIsLoading(true);
 
-    let assistantResponseContent = "I'm sorry, I couldn't process that request.";
-    let generatedSqlQuery = "";
-    let rawQueryResults: any = null;
-    let errorMessage: string | undefined = undefined;
-
     try {
-      const response = await fetch('http://localhost:5000/analyze_table', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          db_config: {
-            host: credentials.host,
-            database: selectedDatabase,
-            user: credentials.username,
-            password: credentials.password,
-            port: credentials.port,
-          },
-          table_name: selectedTable,
-          prompt: currentUserMessage.content,
-        }),
-      });
-      const data = await response.json();
-      console.log("AI response:", data);
-
-      if (response.ok) {
-        if (data.summary || data.model_output?.summary) {
-          assistantResponseContent = data.summary || data.model_output?.summary;
-          if (data.sql_query || data.model_output?.query) {
-            generatedSqlQuery = data.sql_query || data.model_output?.query;
-          }
-          if (data.results) {
-            rawQueryResults = data.results;
-          } else if (data.action_status) {
-            rawQueryResults = data.action_status;
-          }
-        } else if (data.error) {
-          errorMessage = data.error;
-          assistantResponseContent = `An error occurred: ${data.error}`;
-        } else {
-          errorMessage = "Unexpected response from backend.";
-          assistantResponseContent = "Received an unexpected response from the AI backend.";
-        }
-      } else {
-        errorMessage = data.error || `Backend responded with status ${response.status}`;
-        assistantResponseContent = `Failed to process: ${errorMessage}`;
+      const payload: { db_id: string; target: string; message: string; conversation_id?: string } = {
+        db_id: selectedDatabaseId,
+        target: selectedTable,
+        message: currentUserMessage.content
+      };
+      if (currentConversationId) {
+        payload.conversation_id = currentConversationId;
       }
-    } catch (error: any) {
-      console.error("Error communicating with AI backend:", error);
-      errorMessage = error.message || "Network error.";
-      assistantResponseContent = `Could not connect to the AI backend. Please check if the server is running (Error: ${errorMessage}).`;
-    } finally {
-      setIsLoading(false);
+
+      const response = await api.post('/api/chat', payload);
+      
+      if (response.conversation_id && !currentConversationId) {
+        setCurrentConversationId(response.conversation_id);
+      }
 
       const assistantMessage: ChatMessage = {
         role: 'assistant',
-        content: assistantResponseContent,
+        content: response.reply || "No reply generated.",
         timestamp: new Date(),
-        sqlQuery: generatedSqlQuery,
-        rawResults: rawQueryResults,
-        error: errorMessage
+        sqlQuery: response.generated_query,
+        rawResults: response.result_row_count !== undefined ? { rows: response.result_row_count } : null,
+        error: response.error
       };
 
-      setMessages((prevMessages) => [...prevMessages, assistantMessage]);
+      setMessages((prev) => [...prev, assistantMessage]);
+    } catch (error: unknown) {
+      const errMsg = error instanceof Error ? error.message : 'Failed to communicate with AI.';
+      let displayMsg = errMsg;
+      
+      if (errMsg.includes('Groq API key')) {
+        displayMsg = 'Groq API Key is missing. Please configure it in Settings first.';
+      }
+
+      setMessages((prev) => [...prev, {
+        role: 'assistant',
+        content: `Error: ${displayMsg}`,
+        timestamp: new Date(),
+        error: errMsg
+      }]);
+    } finally {
+      setIsLoading(false);
     }
   };
 
   return (
-    <div className="bg-gray-800 rounded-lg h-full flex flex-col">
+    <div className="bg-surface border-l border-surface-border h-full flex flex-col relative overflow-hidden">
       {/* Header */}
-      <div className="p-4 border-b border-gray-700">
-        <div className="flex items-center space-x-2">
-          <MessageSquare className="h-5 w-5 text-blue-400" />
-          <h3 className="font-medium text-white">AI Assistant</h3>
+      <div className="p-5 border-b border-surface-border flex justify-between items-center">
+        <div>
+          <h3 className="font-semibold text-neutral-900 text-lg">AI Assistant</h3>
+          <p className="text-sm text-neutral-500 mt-1">
+            {selectedTable ? `Querying target: ${selectedTable}` : 'Select a target to begin'}
+          </p>
         </div>
-        <p className="text-sm text-gray-400 mt-1">
-          Ask questions about your data in natural language. Table: {selectedTable || 'None Selected'}
-        </p>
+        
+        {/* Actions */}
+        <div className="flex items-center space-x-2">
+          {selectedTable && (
+            <button
+              onClick={startNewChat}
+              className="p-2 text-neutral-500 hover:text-neutral-900 hover:bg-neutral-100 rounded-lg transition-colors"
+              title="New Chat"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 5v14M5 12h14"/>
+              </svg>
+            </button>
+          )}
+          <button
+            onClick={handleHistoryOpen}
+            className="p-2 text-neutral-500 hover:text-neutral-900 hover:bg-neutral-100 rounded-lg transition-colors"
+            title="Chat History"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+              <path d="M3 3v5h5"/>
+              <path d="M12 7v5l4 2"/>
+            </svg>
+          </button>
+        </div>
       </div>
 
-      {/* Chat Messages Area */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4 flex flex-col-reverse">
-        {messages.length === 0 && !selectedTable ? (
-          <div className="text-center text-gray-400 py-8">
-            <Sparkles className="h-8 w-8 mx-auto mb-2 opacity-50" />
-            <p className="text-sm">Please select a database and table to start chatting!</p>
-            <p className="text-xs mt-1">
-              Connect to your database via the "Database" tab.
-            </p>
-          </div>
-        ) : messages.length === 0 && selectedTable ? (
-          <div className="text-center text-gray-400 py-8">
-            <LoadingSpinner size="md" />
-            <p className="text-sm mt-2">Loading AI assistant...</p>
-          </div>
-        ) : (
-          [...messages].reverse().map((message, index) => (
-            <div
-              key={index}
-              className={`flex ${
-                message.role === 'user' ? 'justify-end' : 'justify-start'
-              }`}
-            >
-              <div
-                className={`max-w-[70%] rounded-xl p-3 ${
-                  message.role === 'user'
-                    ? 'bg-blue-600 text-white rounded-br-none'
-                    : 'bg-gray-700 text-gray-200 rounded-bl-none'
+      {/* History Slide-out Panel */}
+      <div 
+        className={`absolute inset-y-0 right-0 w-80 bg-surface border-l border-surface-border shadow-xl transform transition-transform duration-300 z-10 flex flex-col ${
+          isHistoryOpen ? 'translate-x-0' : 'translate-x-full'
+        }`}
+      >
+        <div className="p-4 border-b border-surface-border flex justify-between items-center bg-neutral-50">
+          <h3 className="font-semibold text-neutral-900">Chat History</h3>
+          <button 
+            onClick={() => setIsHistoryOpen(false)}
+            className="text-neutral-500 hover:text-neutral-900 p-1"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-4 space-y-2">
+          {isLoadingHistory ? (
+            <div className="text-center text-neutral-500 text-sm mt-4">Loading history...</div>
+          ) : historyList.length === 0 ? (
+            <div className="text-center text-neutral-400 text-sm mt-4">No past conversations</div>
+          ) : (
+            historyList.map(conv => (
+              <div 
+                key={conv._id}
+                onClick={() => loadConversation(conv._id)}
+                className={`p-3 rounded-lg border cursor-pointer transition-colors group ${
+                  currentConversationId === conv._id 
+                    ? 'border-neutral-900 bg-neutral-50' 
+                    : 'border-neutral-200 hover:border-neutral-300 bg-white'
                 }`}
               >
-                <p className="text-sm whitespace-pre-wrap">{message.content}</p>
-                {message.sqlQuery && (
-                  <div className="mt-2 bg-gray-900 p-2 rounded-lg text-xs text-blue-300 overflow-x-auto">
-                    <p className="font-semibold text-gray-400 mb-1">Generated SQL:</p>
-                    <pre className="whitespace-pre-wrap">{message.sqlQuery}</pre>
+                <div className="flex justify-between items-start">
+                  <div className="flex-1 truncate pr-2">
+                    <p className="text-sm font-medium text-neutral-900 truncate">{conv.target}</p>
+                    <p className="text-xs text-neutral-500 mt-1">{new Date(conv.updated_at).toLocaleDateString()}</p>
                   </div>
-                )}
-                {message.rawResults && message.role === 'assistant' && typeof message.rawResults === 'object' && Object.keys(message.rawResults).length > 0 && (
-                  <div className="mt-2 bg-gray-900 p-2 rounded-lg text-xs text-green-300 overflow-x-auto">
-                    <p className="font-semibold text-gray-400 mb-1">Raw Result ({message.rawResults.length > 0 ? (message.rawResults.rows_affected !== undefined ? 'Action Status' : 'Data') : 'Empty'}):</p>
-                    <pre className="whitespace-pre-wrap">{JSON.stringify(message.rawResults, null, 2)}</pre>
-                  </div>
-                )}
-                <div className="text-right text-xs mt-1 text-gray-400 opacity-70">
-                  {message.timestamp.toLocaleTimeString()}
+                  <button 
+                    onClick={(e) => deleteConversation(e, conv._id)}
+                    className="text-neutral-400 hover:text-red-600 opacity-0 group-hover:opacity-100 transition-opacity p-1"
+                    title="Delete Chat"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="3 6 5 6 21 6"></polyline>
+                      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                    </svg>
+                  </button>
                 </div>
               </div>
-            </div>
-          ))
-        )}
-        {isLoading && (
-          <div className="flex justify-start">
-            <div className="max-w-[70%] rounded-xl p-3 bg-gray-700 text-gray-200 rounded-bl-none">
-              <LoadingSpinner size="sm" />
-              <span className="ml-2 text-sm">Thinking...</span>
-            </div>
-          </div>
-        )}
+            ))
+          )}
+        </div>
       </div>
 
-      {/* Input Form */}
-      <form onSubmit={handleSubmit} className="p-4 border-t border-gray-700">
-        <div className="flex space-x-2">
+      {/* Overlay when history is open */}
+      {isHistoryOpen && (
+        <div 
+          className="absolute inset-0 bg-black/10 z-0"
+          onClick={() => setIsHistoryOpen(false)}
+        />
+      )}
+
+      {/* Main Chat Area */}
+      <div className="flex-1 overflow-y-auto p-5 space-y-6 flex flex-col">
+        {messages.length === 0 && !selectedTable ? (
+          <div className="flex-1 flex items-center justify-center text-neutral-400">
+            <p className="text-sm">Select a target from the sidebar.</p>
+          </div>
+        ) : (
+          messages.map((message, index) => (
+            <MessageBubble key={index} message={message} />
+          ))
+        )}
+        
+        {isLoading && (
+          <div className="flex flex-col items-start">
+             <div className="max-w-[85%] rounded-2xl px-5 py-4 bg-neutral-100 text-neutral-500 rounded-bl-sm border border-neutral-200 flex items-center space-x-2">
+                <div className="w-1.5 h-1.5 bg-neutral-400 rounded-full animate-bounce"></div>
+                <div className="w-1.5 h-1.5 bg-neutral-400 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
+                <div className="w-1.5 h-1.5 bg-neutral-400 rounded-full animate-bounce" style={{ animationDelay: '0.4s' }}></div>
+             </div>
+          </div>
+        )}
+        <div ref={messagesEndRef} />
+      </div>
+
+      <form onSubmit={handleSubmit} className="p-4 bg-surface border-t border-surface-border z-0 relative">
+        <div className="relative">
           <input
             type="text"
             value={question}
             onChange={(e) => setQuestion(e.target.value)}
-            placeholder={selectedTable ? `Ask about the '${selectedTable}' table...` : "Select a table to start chatting..."}
-            className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            placeholder={selectedTable ? `Ask about ${selectedTable}...` : "Select a target first"}
+            className="w-full pl-4 pr-24 py-3 bg-neutral-50 border border-neutral-200 rounded-xl text-neutral-900 text-sm focus:outline-none focus:ring-2 focus:ring-neutral-300 transition-shadow"
             disabled={isLoading || !selectedTable}
           />
           <button
             type="submit"
             disabled={isLoading || !question.trim() || !selectedTable}
-            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            className="absolute right-2 top-2 bottom-2 px-4 bg-neutral-900 text-white text-sm font-medium rounded-lg hover:bg-neutral-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {isLoading ? (
-              <LoadingSpinner size="sm" />
-            ) : (
-              <Send className="h-4 w-4" />
-            )}
+            Send
           </button>
         </div>
       </form>

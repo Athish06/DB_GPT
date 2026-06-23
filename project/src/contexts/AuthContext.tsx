@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components */
 import React, { createContext, useContext, useEffect, useState } from 'react';
 
 interface User {
@@ -28,40 +29,38 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Check for JWT token in localStorage on mount
-    const token = localStorage.getItem('jwt_token');
+    // Check for user data in localStorage on mount
     const userData = localStorage.getItem('jwt_user');
-    if (token && userData) {
+    if (userData) {
       setUser(JSON.parse(userData));
     }
     setLoading(false);
   }, []);
 
   const login = async (email: string, password: string) => {
-    setLoading(true);
-    try {
-      // Replace the URL with your backend endpoint
-      const res = await fetch('http://localhost:5000/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password }),
-        credentials: 'include'
-      });
-      if (!res.ok) throw new Error('Login failed');
-      const data = await res.json();
-      localStorage.setItem('jwt_token', data.token);
-      localStorage.setItem('jwt_user', JSON.stringify(data.user));
-      if (data.databases) {
-        localStorage.setItem('user_databases', JSON.stringify(data.databases));
-      }
-      setUser(data.user);
-    } finally {
-      setLoading(false);
+    const API_URL = import.meta.env.VITE_API_URL;
+    const res = await fetch(`${API_URL}/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+      credentials: 'include'
+    });
+    if (!res.ok) throw new Error('Login failed');
+    const data = await res.json();
+    localStorage.setItem('jwt_user', JSON.stringify(data.user));
+    if (data.databases) {
+      localStorage.setItem('user_databases', JSON.stringify(data.databases));
     }
+    setUser(data.user);
   };
 
-  const logout = () => {
-    localStorage.removeItem('jwt_token');
+  const logout = async () => {
+    try {
+      const API_URL = import.meta.env.VITE_API_URL;
+      await fetch(`${API_URL}/logout_cleanup`, { method: 'POST', credentials: 'include' });
+    } catch (e) {
+      console.error('Logout API failed', e);
+    }
     localStorage.removeItem('jwt_user');
     setUser(null);
   };
@@ -70,7 +69,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   return (
     <AuthContext.Provider value={value}>
-      {!loading && children}
+      {children}
     </AuthContext.Provider>
   );
 };

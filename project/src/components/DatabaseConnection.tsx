@@ -1,75 +1,65 @@
 import React, { useState } from 'react';
-import { Database, ArrowRight } from 'lucide-react';
 import { useDatabase } from '../contexts/DatabaseContext';
-import LoadingSpinner from './ui/LoadingSpinner';
+import { api } from '../services/api';
 
 interface DatabaseConnectionProps {
-  mode?: 'add' | 'connect';
-  userEmail?: string; // Add this prop
   onClose?: () => void;
   onSuccess?: () => void;
 }
 
-const DatabaseConnection: React.FC<DatabaseConnectionProps> = ({
-  mode = 'connect',
-  userEmail,
-  onClose,
-  onSuccess
-}) => {
+const DatabaseConnection: React.FC<DatabaseConnectionProps> = ({ onClose, onSuccess }) => {
   const databaseContext = useDatabase();
-  if (!databaseContext) {
-    throw new Error('DatabaseContext is undefined. Please ensure DatabaseProvider is used.');
-  }
-  const { setCredentials, setIsConnected } = databaseContext;
+  const fetchDatabases = databaseContext?.fetchDatabases;
+
   const [formData, setFormData] = useState({
-    type: 'postgresql' as const,
+    type: 'postgresql',
+    display_name: '',
     host: '',
     port: 5432,
     username: '',
     password: '',
-    database: ''
+    database_name: '',
+    connection_string: '',
   });
   const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState('');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
-
-    const payload = {
-      host: formData.host,
-      database: formData.database,
-      user: formData.username,
-      password: formData.password,
-      port: formData.port,
-      name: userEmail
-    };
+    setError('');
 
     try {
-      const endpoint = mode === 'add' ? 'http://localhost:5000/add_db' : 'http://localhost:5000/connect_db';
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        credentials: 'include',
-        body: JSON.stringify(payload),
-      });
-      const data = await response.json();
-      if (response.ok && data.status === 'success') {
-        setCredentials(formData);
-        setIsConnected(true);
-        if (onSuccess) onSuccess(); // Call without arguments
-        if (onClose) onClose();
-      } else {
-        setIsConnected(false);
-        console.error(data.message);
-      }
-    } catch (error) {
-      setIsConnected(false);
-      console.error('Connection error:', error);
-    }
+      const payload: Record<string, string | number> = {
+        type: formData.type,
+        display_name: formData.display_name || formData.database_name || 'My Database',
+      };
 
-    setIsLoading(false);
+      if (formData.type === 'mongodb') {
+        payload.connection_string = formData.connection_string;
+        payload.database_name = formData.database_name;
+      } else {
+        payload.host = formData.host;
+        payload.port = formData.port;
+        payload.user_name = formData.username;
+        payload.password = formData.password;
+        payload.database_name = formData.database_name;
+      }
+
+      await api.post('/add_db', payload);
+      
+      if (fetchDatabases) {
+        await fetchDatabases();
+      }
+      
+      if (onSuccess) onSuccess();
+      if (onClose) onClose();
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : 'Connection failed.';
+      setError(errMsg);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
@@ -81,127 +71,152 @@ const DatabaseConnection: React.FC<DatabaseConnectionProps> = ({
   };
 
   return (
-    <div className="min-h-screen bg-gray-900 flex items-center justify-center px-4">
-      <div
-        className="max-w-md w-full space-y-8"
-        style={{ minWidth: 300, maxWidth: 800, width: 400 }}
-      >
-        <div className="text-center">
-          <div className="mx-auto h-12 w-12 bg-blue-600 rounded-lg flex items-center justify-center">
-            <Database className="h-6 w-6 text-white" />
-          </div>
-          <h2 className="mt-6 text-3xl font-bold text-white">
-            Connect Database
-          </h2>
-          <p className="mt-2 text-gray-400">
-            Enter your database connection details
-          </p>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm px-4">
+      <div className="bg-surface border border-surface-border w-full max-w-md rounded-lg shadow-md overflow-hidden">
+        <div className="p-6 border-b border-surface-border">
+          <h2 className="text-xl font-semibold text-neutral-900">Connect Database</h2>
+          <p className="text-sm text-neutral-500 mt-1">Add a new data source to your workspace.</p>
         </div>
 
-        <form onSubmit={handleSubmit} className="mt-8 space-y-6">
+        <form onSubmit={handleSubmit} className="p-6 space-y-4">
+          {error && (
+            <div className="p-3 text-sm text-red-600 bg-red-50 rounded-md border border-red-200">
+              {error}
+            </div>
+          )}
+
           <div>
-            <label className="block text-sm font-medium text-gray-300 mb-2">
-              Database Type
-            </label>
+            <label className="block text-sm font-medium text-neutral-700 mb-1">Display Name (Optional)</label>
+            <input
+              type="text"
+              name="display_name"
+              value={formData.display_name}
+              onChange={handleInputChange}
+              placeholder="e.g. Production DB"
+              className="w-full input-field"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-neutral-700 mb-1">Database Type</label>
             <select
               name="type"
               value={formData.type}
               onChange={handleInputChange}
-              className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full input-field"
               required
             >
               <option value="postgresql">PostgreSQL</option>
-              <option value="mysql">MySQL</option>
+              <option value="supabase">Supabase</option>
               <option value="mongodb">MongoDB</option>
             </select>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-300 mb-2">
-                Host
-              </label>
-              <input
-                type="text"
-                name="host"
-                value={formData.host}
-                onChange={handleInputChange}
-                placeholder="localhost"
-                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-                required
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-300 mb-2">
-                Port
-              </label>
-              <input
-                type="number"
-                name="port"
-                value={formData.port}
-                onChange={handleInputChange}
-                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-                required
-              />
-            </div>
-          </div>
+          {formData.type === 'mongodb' ? (
+            <>
+              <div>
+                <label className="block text-sm font-medium text-neutral-700 mb-1">Connection String (URI)</label>
+                <input
+                  type="password"
+                  name="connection_string"
+                  value={formData.connection_string}
+                  onChange={handleInputChange}
+                  placeholder="mongodb+srv://..."
+                  className="w-full input-field"
+                  required
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-neutral-700 mb-1">Database Name</label>
+                <input
+                  type="text"
+                  name="database_name"
+                  value={formData.database_name}
+                  onChange={handleInputChange}
+                  className="w-full input-field"
+                  required
+                />
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-neutral-700 mb-1">Host</label>
+                  <input
+                    type="text"
+                    name="host"
+                    value={formData.host}
+                    onChange={handleInputChange}
+                    className="w-full input-field"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-neutral-700 mb-1">Port</label>
+                  <input
+                    type="number"
+                    name="port"
+                    value={formData.port}
+                    onChange={handleInputChange}
+                    className="w-full input-field"
+                    required
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-neutral-700 mb-1">Database Name</label>
+                <input
+                  type="text"
+                  name="database_name"
+                  value={formData.database_name}
+                  onChange={handleInputChange}
+                  className="w-full input-field"
+                  required
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-neutral-700 mb-1">Username</label>
+                <input
+                  type="text"
+                  name="username"
+                  value={formData.username}
+                  onChange={handleInputChange}
+                  className="w-full input-field"
+                  required
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-neutral-700 mb-1">Password</label>
+                <input
+                  type="password"
+                  name="password"
+                  value={formData.password}
+                  onChange={handleInputChange}
+                  className="w-full input-field"
+                  required
+                />
+              </div>
+            </>
+          )}
 
-          <div>
-            <label className="block text-sm font-medium text-gray-300 mb-2">
-              Username
-            </label>
-            <input
-              type="text"
-              name="username"
-              value={formData.username}
-              onChange={handleInputChange}
-              className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-              required
-            />
+          <div className="pt-4 flex justify-end space-x-3">
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={isLoading}
+              className="btn-secondary"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={isLoading}
+              className="btn-primary"
+            >
+              {isLoading ? 'Connecting...' : 'Connect'}
+            </button>
           </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-300 mb-2">
-              Password
-            </label>
-            <input
-              type="password"
-              name="password"
-              value={formData.password}
-              onChange={handleInputChange}
-              className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-              required
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-gray-300 mb-2">
-              Database Name
-            </label>
-            <input
-              type="text"
-              name="database"
-              value={formData.database}
-              onChange={handleInputChange}
-              className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-              required
-            />
-          </div>
-
-          <button
-            type="submit"
-            disabled={isLoading}
-            className="w-full flex justify-center items-center space-x-2 py-3 px-4 border border-transparent text-sm font-medium rounded-lg text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {isLoading ? (
-              <LoadingSpinner size="sm" />
-            ) : (
-              <>
-                <span>Connect</span>
-                <ArrowRight className="h-4 w-4" />
-              </>
-            )}
-          </button>
         </form>
       </div>
     </div>
