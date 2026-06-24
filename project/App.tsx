@@ -1,38 +1,14 @@
-import React, { useEffect } from 'react';
+import React from 'react';
 import { Toaster } from 'react-hot-toast';
 import { AuthProvider, useAuth } from './src/contexts/AuthContext';
-import { DatabaseProvider, useDatabase } from './src/contexts/DatabaseContext';
+import { DatabaseProvider } from './src/contexts/DatabaseContext';
 import Login from './src/components/Login';
 import Dashboard from './src/components/Dashboard';
 import LoadingSpinner from './src/components/ui/LoadingSpinner';
+import { StorageDashboard } from './src/components/StorageDashboard';
 
 const AppContent: React.FC = () => {
   const { user, loading: authLoading } = useAuth();
-  const databaseContext = useDatabase();
-  const { isConnected, setCredentials, setIsConnected } = databaseContext || {};
-
-  // Try to auto-connect if user has databases in localStorage and not already connected
-  useEffect(() => {
-    if (user && !isConnected) {
-      const dbs = localStorage.getItem('user_databases');
-      if (dbs) {
-        const databases = JSON.parse(dbs);
-        if (databases.length > 0) {
-          // You can let user pick, or auto-connect to the first one
-          const db = databases[0];
-          setCredentials && setCredentials({
-            type: 'postgresql',
-            host: db.host,
-            port: db.port,
-            username: db.user_name,
-            password: db.password,
-            database: db.database_name,
-          });
-          setIsConnected && setIsConnected(true);
-        }
-      }
-    }
-  }, [user, isConnected, setCredentials, setIsConnected]);
 
   if (authLoading) {
     return (
@@ -51,6 +27,10 @@ const AppContent: React.FC = () => {
   ///if (!isConnected && (!userDatabases || JSON.parse(userDatabases).length === -1)) {
    /// return <DatabaseConnection />;
  /// }
+
+  if (window.location.pathname === '/storage') {
+    return <StorageDashboard />;
+  }
 
   return <Dashboard />;
 };

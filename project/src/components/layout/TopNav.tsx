@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useAuth } from '../../contexts/AuthContext';
 import SettingsModal from '../SettingsModal';
-import { api } from '../../services/api';
+
 
 const TopNav: React.FC = () => {
   const { user, logout: originalLogout } = useAuth();
@@ -34,6 +34,22 @@ const TopNav: React.FC = () => {
             {user?.email}
           </div>
           
+          {window.location.pathname === '/' ? (
+            <a
+              href="/storage"
+              className="text-sm font-medium text-neutral-600 hover:text-neutral-900 transition-colors"
+            >
+              Storage
+            </a>
+          ) : (
+            <a
+              href="/"
+              className="text-sm font-medium text-neutral-600 hover:text-neutral-900 transition-colors"
+            >
+              Dashboard
+            </a>
+          )}
+
           <button
             onClick={() => setShowSettings(true)}
             className="text-sm font-medium text-neutral-600 hover:text-neutral-900 transition-colors"

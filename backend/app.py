@@ -319,7 +319,7 @@ def api_chat():
             
         groq_api_key = encryption_service.decrypt(groq_key_encrypted)
         # Enqueue the background task
-        job_id = str(uuid.uuid4())
+        job_id = f"j_{g.user_id}_{db_id}_{target}_{str(uuid.uuid4())[:8]}"
         task_queue.enqueue(
             'services.agent_worker.execute_agent_task',
             kwargs={
@@ -377,7 +377,7 @@ def api_chat_resume(conversation_id):
             return jsonify({"error": "No paused state found for this conversation"}), 400
             
         # Enqueue the background task with the resume state
-        job_id = str(uuid.uuid4())
+        job_id = f"j_{g.user_id}_{conversation['db_id']}_{conversation['target']}_{str(uuid.uuid4())[:8]}"
         task_queue.enqueue(
             'services.agent_worker.execute_agent_task',
             kwargs={
@@ -489,7 +489,241 @@ def delete_conversation_api(conversation_id):
     if success:
         return jsonify({"success": True}), 200
     return jsonify({"error": "Conversation not found or deletion failed"}), 404
+@app.route('/api/storage', methods=['GET'])
+@require_auth
+def get_storage_stats():
+    import os
+    from services.redis_client import get_redis_connection
+    from services.parquet_manager import CACHE_DIR
+    
+    db = get_project_db()
+    
+    # 1. MongoDB Schema Cache Stats
+    schema_cursor = db.schema_cache.find({"user_id": g.user_id})
+    schema_cache_stats = []
+    for doc in schema_cursor:
+        # Approximate size of BSON
+        approx_size = len(str(doc))
+        schema_cache_stats.append({
+            "db_id": doc["db_id"],
+            "target": "schema",
+            "size_bytes": approx_size,
+            "expires_at": doc.get("expires_at", None)
+        })
+        
+    # 2. DuckDB Parquet Files
+    parquet_stats = []
+    if os.path.exists(CACHE_DIR):
+        for filename in os.listdir(CACHE_DIR):
+            if filename.startswith(f"c_{g.user_id}_"):
+                filepath = os.path.join(CACHE_DIR, filename)
+                try:
+                    size = os.path.getsize(filepath)
+                    parts = filename.split("_")
+                    if len(parts) >= 5:
+                        db_id = parts[2]
+                        target = parts[3]
+                        parquet_stats.append({
+                            "db_id": db_id,
+                            "target": target,
+                            "filename": filename,
+                            "size_bytes": size
+                        })
+                except Exception:
+                    pass
+                    
+    # 3. Redis Queue Stats
+    redis_conn = get_redis_connection()
+    redis_stats = []
+    
+    def scan_redis(prefix, type_name):
+        for key in redis_conn.scan_iter(f"{prefix}:j_{g.user_id}_*"):
+            key_str = key.decode("utf-8")
+            parts = key_str.split("_")
+            if len(parts) >= 5:
+                db_id = parts[2]
+                target = parts[3]
+                try:
+                    size = redis_conn.memory_usage(key) or 0
+                    redis_stats.append({
+                        "db_id": db_id,
+                        "target": target,
+                        "type": type_name,
+                        "key": key_str,
+                        "size_bytes": size
+                    })
+                except Exception:
+                    pass
+                    
+    scan_redis("scratchpad", "scratchpad")
+    scan_redis("job_status", "job_status")
+    
+    # Group by database and target
+    grouped = {}
+    
+    def add_to_group(item, category):
+        k = f"{item['db_id']}_{item['target']}"
+        if k not in grouped:
+            grouped[k] = {
+                "db_id": item['db_id'],
+                "target": item['target'],
+                "schema_cache": {"count": 0, "size_bytes": 0},
+                "parquet_files": {"count": 0, "size_bytes": 0},
+                "redis_keys": {"count": 0, "size_bytes": 0}
+            }
+        grouped[k][category]["count"] += 1
+        grouped[k][category]["size_bytes"] += item["size_bytes"]
 
+    for item in schema_cache_stats: add_to_group(item, "schema_cache")
+    for item in parquet_stats: add_to_group(item, "parquet_files")
+    for item in redis_stats: add_to_group(item, "redis_keys")
+
+    return jsonify(list(grouped.values()))
+
+@app.route('/api/storage/details', methods=['GET'])
+@require_auth
+def get_storage_details():
+    import os
+    import pandas as pd
+    from services.redis_client import get_redis_connection
+    from services.parquet_manager import CACHE_DIR
+    
+    db_id = request.args.get('db_id')
+    target = request.args.get('target')
+    
+    if not db_id or not target:
+        return jsonify({"error": "Missing db_id or target"}), 400
+        
+    db = get_project_db()
+    
+    # 1. MongoDB Schema
+    schema_doc = db.schema_cache.find_one({"user_id": g.user_id, "db_id": db_id})
+    if schema_doc:
+        schema_doc.pop("_id", None)
+        schema_doc.pop("expires_at", None)
+        schema_doc.pop("cached_at", None)
+        
+    # 2. DuckDB Parquet Data
+    parquet_data = []
+    if os.path.exists(CACHE_DIR):
+        for filename in os.listdir(CACHE_DIR):
+            if filename.startswith(f"c_{g.user_id}_{db_id}_{target}"):
+                filepath = os.path.join(CACHE_DIR, filename)
+                try:
+                    df = pd.read_parquet(filepath)
+                    # Limit to 50 rows to prevent overwhelming the browser
+                    preview = df.head(50).to_dict(orient="records")
+                    parquet_data.append({
+                        "filename": filename,
+                        "rows": preview,
+                        "total_rows": len(df)
+                    })
+                except Exception as e:
+                    parquet_data.append({
+                        "filename": filename,
+                        "error": str(e)
+                    })
+                    
+    # 3. Redis Queue Data
+    redis_conn = get_redis_connection()
+    redis_data = []
+    
+    def scan_redis_details(prefix):
+        for key in redis_conn.scan_iter(f"{prefix}:j_{g.user_id}_{db_id}_{target}_*"):
+            try:
+                raw_val = redis_conn.get(key)
+                if raw_val:
+                    # Attempt to parse as JSON if possible
+                    import json
+                    val_str = raw_val.decode("utf-8")
+                    try:
+                        val = json.loads(val_str)
+                    except:
+                        val = val_str
+                        
+                    redis_data.append({
+                        "key": key.decode("utf-8"),
+                        "type": prefix,
+                        "value": val
+                    })
+            except Exception:
+                pass
+                
+    scan_redis_details("scratchpad")
+    scan_redis_details("job_status")
+    
+    return jsonify({
+        "schema_cache": schema_doc,
+        "parquet_files": parquet_data,
+        "redis_keys": redis_data
+    })
+
+@app.route('/api/storage', methods=['DELETE'])
+@require_auth
+def delete_storage():
+    import os
+    from services.redis_client import get_redis_connection
+    from services.parquet_manager import CACHE_DIR
+    
+    db_id = request.args.get('db_id')
+    target = request.args.get('target') # Optional: if not provided, means entire DB
+    
+    if not db_id:
+        return jsonify({"error": "Missing db_id"}), 400
+        
+    db = get_project_db()
+    redis_conn = get_redis_connection()
+    
+    deleted_parquet = 0
+    deleted_redis = 0
+    deleted_schema = False
+    
+    try:
+        # Scenario A: Delete Specific Target
+        if target:
+            # 1. Parquet Files
+            if os.path.exists(CACHE_DIR):
+                for filename in os.listdir(CACHE_DIR):
+                    if filename.startswith(f"c_{g.user_id}_{db_id}_{target}_"):
+                        os.remove(os.path.join(CACHE_DIR, filename))
+                        deleted_parquet += 1
+                        
+            # 2. Redis Keys
+            for prefix in ["scratchpad", "job_status"]:
+                for key in redis_conn.scan_iter(f"{prefix}:j_{g.user_id}_{db_id}_{target}_*"):
+                    redis_conn.delete(key)
+                    deleted_redis += 1
+                    
+        # Scenario B: Delete Entire DB
+        else:
+            # 1. MongoDB Schema Cache
+            res = db.schema_cache.delete_one({"user_id": g.user_id, "db_id": db_id})
+            deleted_schema = res.deleted_count > 0
+            
+            # 2. Parquet Files
+            if os.path.exists(CACHE_DIR):
+                for filename in os.listdir(CACHE_DIR):
+                    if filename.startswith(f"c_{g.user_id}_{db_id}_"):
+                        os.remove(os.path.join(CACHE_DIR, filename))
+                        deleted_parquet += 1
+                        
+            # 3. Redis Keys
+            for prefix in ["scratchpad", "job_status"]:
+                for key in redis_conn.scan_iter(f"{prefix}:j_{g.user_id}_{db_id}_*"):
+                    redis_conn.delete(key)
+                    deleted_redis += 1
+                    
+        return jsonify({
+            "success": True,
+            "deleted": {
+                "parquet_files": deleted_parquet,
+                "redis_keys": deleted_redis,
+                "schema_cache": deleted_schema
+            }
+        }), 200
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 if __name__ == "__main__":
     # Disable Werkzeug reloader on Windows to prevent PyMongo socket clashes (WinError 10038)
     app.run(debug=True, use_reloader=False)
