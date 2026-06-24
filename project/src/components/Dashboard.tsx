@@ -18,10 +18,10 @@ const Dashboard: React.FC = () => {
       <div className="flex-1 flex overflow-hidden">
         <Sidebar />
 
-        <div className="flex-1 flex flex-col bg-surface relative">
+        <div className="flex-1 flex flex-col bg-surface relative min-w-0">
           {/* Header tabs */}
           {selectedDatabaseId && (
-            <div className="flex border-b border-surface-border bg-neutral-50 px-6 pt-4">
+            <div className="flex border-b border-surface-border bg-neutral-50 px-6 pt-4 flex-shrink-0">
               <button
                 className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
                   activeTab === 'table'
@@ -46,7 +46,7 @@ const Dashboard: React.FC = () => {
           )}
 
           {/* Main Content Area */}
-          <div className="flex-1 overflow-hidden flex flex-col relative">
+          <div className="flex-1 overflow-hidden flex flex-col relative min-w-0">
             {!selectedDatabaseId ? (
               <div className="absolute inset-0 flex flex-col items-center justify-center text-neutral-400">
                 <div className="text-xl font-medium text-neutral-600 mb-2">Welcome to DB_GPT</div>

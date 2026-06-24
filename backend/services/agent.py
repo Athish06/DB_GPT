@@ -15,30 +15,44 @@ from services.redis_client import set_scratchpad
 def format_schema_for_prompt(schema_cache: Dict, target_table: str, db_type: str) -> str:
     if db_type in ("postgresql", "supabase"):
         schemas = schema_cache.get("sql_schemas", {})
-        if target_table not in schemas:
-            return f"-- Table '{target_table}' schema not available"
-        cols = schemas[target_table]["columns"]
-        ddl = f"CREATE TABLE {target_table} (\n"
-        col_parts = []
-        for col in cols:
-            pk = " PRIMARY KEY" if col.get("is_primary_key") else ""
-            nullable = "" if col.get("nullable") == "YES" else " NOT NULL"
-            col_parts.append(f"    {col['name']} {col['data_type']}{pk}{nullable}")
-        ddl += ",\n".join(col_parts) + "\n);"
-        return ddl
+        target_tables = list(schemas.keys()) if target_table == "__all__" else [target_table]
+        
+        ddls = []
+        for t in target_tables:
+            if t not in schemas:
+                ddls.append(f"-- Table '{t}' schema not available")
+                continue
+            cols = schemas[t]["columns"]
+            ddl = f"CREATE TABLE {t} (\n"
+            col_parts = []
+            for col in cols:
+                pk = " PRIMARY KEY" if col.get("is_primary_key") else ""
+                nullable = "" if col.get("nullable") == "YES" else " NOT NULL"
+                col_parts.append(f"    {col['name']} {col['data_type']}{pk}{nullable}")
+            ddl += ",\n".join(col_parts) + "\n);"
+            ddls.append(ddl)
+        return "\n\n".join(ddls)
+        
     elif db_type == "mongodb":
         mongo_schemas = schema_cache.get("mongo_schemas", {})
-        if target_table not in mongo_schemas:
-            return f"-- Collection '{target_table}' schema not available"
-        fields = mongo_schemas[target_table]["fields"]
-        lines = [f"Collection: {target_table}", "Fields (inferred from document samples):"]
-        for fname, fmeta in fields.items():
-            ptype = fmeta.get("primary_type", "mixed")
-            samples = fmeta.get("sample_values", [])
-            sample_str = f"  (e.g. {samples[0]})" if samples else ""
-            array_flag = " [array]" if fmeta.get("is_array") else ""
-            lines.append(f"  {fname}: {ptype}{array_flag}{sample_str}")
-        return "\n".join(lines)
+        target_cols = list(mongo_schemas.keys()) if target_table == "__all__" else [target_table]
+        
+        blocks = []
+        for c in target_cols:
+            if c not in mongo_schemas:
+                blocks.append(f"-- Collection '{c}' schema not available")
+                continue
+            fields = mongo_schemas[c]["fields"]
+            lines = [f"Collection: {c}", "Fields (inferred from document samples):"]
+            for fname, fmeta in fields.items():
+                ptype = fmeta.get("primary_type", "mixed")
+                samples = fmeta.get("sample_values", [])
+                sample_str = f"  (e.g. {samples[0]})" if samples else ""
+                array_flag = " [array]" if fmeta.get("is_array") else ""
+                lines.append(f"  {fname}: {ptype}{array_flag}{sample_str}")
+            blocks.append("\n".join(lines))
+        return "\n\n".join(blocks)
+        
     return "Schema unavailable"
 
 
@@ -53,6 +67,31 @@ SCHEMA:
 {schema_ddl}
 
 You run in a loop of THOUGHT, ACTION, and ACTION_INPUT to solve complex analytical questions.
+
+INITIAL FILTERING RULE:
+Before executing any database queries, you MUST evaluate if the user's question is relevant to the provided SCHEMA.
+If the question is completely irrelevant to the database (e.g., asking for a recipe, general knowledge, or data that clearly does not exist in the schema), you MUST immediately use the FINAL_ANSWER action to politely reject the request, explaining that it falls outside the scope of the connected database.
+
+ANALYTICAL & SQL DIRECTIVES:
+When generating SQL queries (either for the primary database or DuckDB), you must strictly adhere to the following data engineering rules to ensure mathematical accuracy:
+
+1. Prevent Cartesian Aggregation Skew:
+Never calculate an AVG(), SUM(), or COUNT(DISTINCT) on a parent table AFTER joining it to a 1-to-many child table. This creates duplicate rows and skews the math.
+Incorrect: SELECT AVG(users.age) FROM users JOIN actions...
+Correct: Aggregate the child table in a CTE first, OR use a subquery to isolate unique parent IDs before averaging.
+
+2. Independent Event Calculations (No Strict Funnels):
+Unless the user explicitly asks for a chronological funnel, treat different action types as mathematically independent. Do not use JOIN conditions that require a user to have performed Action A in order to count their Action B. Calculate independent events using Conditional Aggregation (SUM(CASE WHEN...)) on the base table.
+
+3. Division Safety & Type Casting:
+Whenever calculating a ratio, percentage, or division:
+ALWAYS cast the numerator to a float/numeric type to prevent integer division zeroing (e.g., COUNT(x)::FLOAT / COUNT(y)).
+ALWAYS wrap the denominator in NULLIF(denominator, 0) to prevent fatal "Division by Zero" errors.
+
+4. Events vs. Entities:
+Pay close attention to semantic phrasing.
+If asked for "Total Lost Profit," calculate the profit lost for every specific event occurrence (frequency), not just the sum of unique products.
+If asked for "Unique Users," explicitly use DISTINCT user_id.
 
 ALLOWED ACTIONS:
 1. EXECUTE_PRIMARY_QUERY

@@ -75,10 +75,15 @@ const Sidebar: React.FC = () => {
               {databases.map(db => (
                 <button
                   key={db.db_id}
-                  onClick={() => setSelectedDatabaseId(db.db_id)}
+                  onClick={() => {
+                    setSelectedDatabaseId(db.db_id);
+                    setSelectedTable(null);
+                  }}
                   className={`w-full text-left px-3 py-2 text-sm rounded-md transition-all ${
-                    selectedDatabaseId === db.db_id 
+                    selectedDatabaseId === db.db_id && selectedTable === null
                       ? 'bg-neutral-900 text-white font-medium shadow-sm' 
+                      : selectedDatabaseId === db.db_id
+                      ? 'bg-neutral-200 text-neutral-800 font-medium'
                       : 'text-neutral-700 hover:bg-neutral-100'
                   }`}
                 >

@@ -35,7 +35,7 @@ const DatabaseConnection: React.FC<DatabaseConnectionProps> = ({ onClose, onSucc
         display_name: formData.display_name || formData.database_name || 'My Database',
       };
 
-      if (formData.type === 'mongodb') {
+      if (formData.type === 'mongodb' || formData.type === 'supabase') {
         payload.connection_string = formData.connection_string;
         payload.database_name = formData.database_name;
       } else {
@@ -112,7 +112,7 @@ const DatabaseConnection: React.FC<DatabaseConnectionProps> = ({ onClose, onSucc
             </select>
           </div>
 
-          {formData.type === 'mongodb' ? (
+          {formData.type === 'mongodb' || formData.type === 'supabase' ? (
             <>
               <div>
                 <label className="block text-sm font-medium text-neutral-700 mb-1">Connection String (URI)</label>
@@ -121,7 +121,7 @@ const DatabaseConnection: React.FC<DatabaseConnectionProps> = ({ onClose, onSucc
                   name="connection_string"
                   value={formData.connection_string}
                   onChange={handleInputChange}
-                  placeholder="mongodb+srv://..."
+                  placeholder={formData.type === 'supabase' ? "postgresql://postgres.[ref]:[password]@aws-0-us-east-1.pooler.supabase.com:6543/postgres" : "mongodb+srv://..."}
                   className="w-full input-field"
                   required
                 />

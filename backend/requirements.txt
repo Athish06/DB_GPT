@@ -14,3 +14,7 @@ gunicorn
 Flask-CORS
 Flask
 python-dotenv
+PyJWT
+bcrypt
+psycopg2-binary
+honcho

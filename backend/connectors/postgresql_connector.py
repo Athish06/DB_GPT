@@ -10,19 +10,30 @@ class PostgreSQLConnector(BaseDBConnector):
 
     def _get_connection(self):
         if self._conn is None or self._conn.closed:
-            params = {
-                "host": self.config.host,
-                "port": self.config.port,
-                "database": self.config.database_name,
-                "user": self.config.username,
-                "password": self.config.password,
-                "connect_timeout": 10,
-                "cursor_factory": psycopg2.extras.RealDictCursor
-            }
-            # Supabase requires SSL; respect explicit ssl_required flag
-            if self.config.ssl_required or self.config.type == DBType.SUPABASE:
-                params["sslmode"] = "require"
-            self._conn = psycopg2.connect(**params)
+            if self.config.connection_string:
+                # Use connection string if provided (e.g. for Supabase pooler)
+                params = {
+                    "dsn": self.config.connection_string,
+                    "cursor_factory": psycopg2.extras.RealDictCursor
+                }
+                if self.config.ssl_required or self.config.type == DBType.SUPABASE:
+                    params["sslmode"] = "require"
+                self._conn = psycopg2.connect(**params)
+            else:
+                # Fallback to individual fields
+                params = {
+                    "host": self.config.host,
+                    "port": self.config.port,
+                    "database": self.config.database_name,
+                    "user": self.config.username,
+                    "password": self.config.password,
+                    "connect_timeout": 10,
+                    "cursor_factory": psycopg2.extras.RealDictCursor
+                }
+                # Supabase requires SSL; respect explicit ssl_required flag
+                if self.config.ssl_required or self.config.type == DBType.SUPABASE:
+                    params["sslmode"] = "require"
+                self._conn = psycopg2.connect(**params)
         return self._conn
 
     def test_connection(self) -> Tuple[bool, str]:
@@ -90,7 +101,17 @@ class PostgreSQLConnector(BaseDBConnector):
 
         return {
             "table_name": table_name,
-            "columns": [dict(col) for col in columns],
+            "columns": [
+                {
+                    "name": col["column_name"],
+                    "data_type": col["data_type"],
+                    "nullable": col["is_nullable"],
+                    "is_primary_key": col["is_primary_key"],
+                    "foreign_table": col["foreign_table"],
+                    "foreign_column": col["foreign_column"]
+                }
+                for col in columns
+            ],
             "row_count_approx": row_count
         }
 

@@ -26,6 +26,10 @@ if FRONTEND_URL:
 else:
     CORS(app, supports_credentials=True)
 
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({"status": "healthy"}), 200
+
 # Initialize MongoDB collections and indexes lazily to prevent Werkzeug Windows socket crashes
 _indexes_initialized = False
 
@@ -99,6 +103,58 @@ def view_tables():
         tables = connector.get_tables_or_collections()
         connector.close()
         return jsonify({"tables": tables})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/db_summary', methods=['POST'])
+@require_auth
+def view_db_summary():
+    """
+    Expects JSON with db_id.
+    Returns summary of all tables (name, column count, row count).
+    """
+    data = request.get_json()
+    db_id = data.get("db_id")
+    if not db_id:
+        return jsonify({"error": "Missing db_id"}), 400
+        
+    try:
+        db_config = _get_user_db_config(g.user_id, db_id)
+        schema_data = schema_cache_service.get(g.user_id, db_id)
+        
+        if not schema_data:
+            connector = get_connector(db_config)
+            tables = connector.get_tables_or_collections()
+            schemas = {}
+            for t in tables:
+                try:
+                    schemas[t] = connector.get_schema(t)
+                except Exception as e:
+                    print(f"Failed to fetch schema for {t}: {e}")
+            connector.close()
+            schema_data = {
+                "sql_schemas": schemas if db_config.type in (DBType.POSTGRESQL, DBType.SUPABASE) else {},
+                "mongo_schemas": schemas if db_config.type == DBType.MONGODB else {}
+            }
+            schema_cache_service.set(g.user_id, db_id, schema_data)
+
+        summary = []
+        if db_config.type in (DBType.POSTGRESQL, DBType.SUPABASE):
+            for t_name, s_data in schema_data.get("sql_schemas", {}).items():
+                summary.append({
+                    "table_name": t_name,
+                    "columns_count": len(s_data.get("columns", [])),
+                    "row_count": s_data.get("row_count_approx", 0)
+                })
+        else:
+            for c_name, s_data in schema_data.get("mongo_schemas", {}).items():
+                summary.append({
+                    "table_name": c_name,
+                    "columns_count": len(s_data.get("fields", {}).keys()),
+                    "row_count": s_data.get("document_count", 0)
+                })
+                
+        return jsonify({"summary": summary})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -220,7 +276,7 @@ def add_db():
         "type": db_type,
         "database_name": data.get("database_name", ""),
         "host": data.get("host", ""),
-        "port": int(data.get("port", 5432)),
+        "port": int(data.get("port") or 5432),
         "username_encrypted": encryption_service.encrypt(data.get("user_name", "")) if data.get("user_name") else "",
         "password_encrypted": encryption_service.encrypt(data.get("password", "")) if data.get("password") else "",
         "ssl_required": data.get("ssl_required", False),
@@ -246,9 +302,13 @@ def api_chat():
     target = data.get("target")  # table or collection name
     message = data.get("message")
     conversation_id = data.get("conversation_id")
+    overwrite_last = data.get("overwrite_last", False)
     
     if not all([db_id, target, message]):
         return jsonify({"error": "Missing db_id, target, or message"}), 400
+        
+    if overwrite_last and conversation_id:
+        conversation_manager.remove_last_turn(conversation_id)
         
     try:
         db = get_project_db()
